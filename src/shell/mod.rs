@@ -246,7 +246,9 @@ fn cmd_ai_load() {
     crate::serial_println!("[ai-load] Reading GGUF header from disk LBA 0...");
 
     // Read first 64 KiB to parse GGUF header
-    let header_size = 64 * 1024;
+    // Read 16 KiB to parse GGUF header. Not enough for full metadata
+    // (tokenizer vocab needs ~3 MiB) but validates the parsing pipeline.
+    let header_size = 16 * 1024;
     let mut header_buf = alloc::vec![0u8; header_size];
 
     let result = if crate::drivers::virtio_blk::is_detected() {

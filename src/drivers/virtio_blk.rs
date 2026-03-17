@@ -111,35 +111,49 @@ pub fn init() {
 
         write_reg16(io_base, REG_QUEUE_SELECT, 0);
         let queue_size_max = read_reg16(io_base, REG_QUEUE_SIZE);
+        crate::serial_println!("[virtio-blk] queue max size: {}", queue_size_max);
         if queue_size_max == 0 {
             crate::serial_println!("[virtio-blk] queue not available"); return;
         }
 
-        // Allocate VQ memory from the frame allocator. We need the physical address
-        // known, and the layout must match what virtio legacy expects:
-        //   PFN * 4096 + 0:     descriptor table (16 * queue_size bytes)
-        //   PFN * 4096 + desc:  available ring (6 + 2 * queue_size bytes)
-        //   align(above, 4096): used ring
-        // With QUEUE_SIZE=16: desc=256, avail=38, total=294 → used at offset 4096
-        // So we need 2 contiguous pages.
+        // Allocate VQ memory. The device's queue size determines the layout:
+        //   desc_table:  queue_size * 16 bytes
+        //   avail_ring:  6 + 2 * queue_size bytes
+        //   used_ring:   align_up(desc + avail, 4096)
         //
-        // The bump allocator gives sequential frames from a contiguous region,
-        // so allocating 2 frames in sequence gives contiguous physical pages.
+        // For queue_size=256: desc=4096, avail=518, total=4614
+        //   → used at offset 8192 (page 2)
+        //   → need 3 pages total (desc on page 0, avail on page 1, used on page 2)
+        let qsz = queue_size_max as usize;
+        let desc_bytes = qsz * 16; // sizeof(VqDesc) = 16
+        let avail_bytes = 6 + 2 * qsz;
+        let used_offset = ((desc_bytes + avail_bytes) + 4095) & !4095;
+        let used_bytes = 6 + 8 * qsz;
+        let total_bytes = used_offset + used_bytes;
+        let n_pages = (total_bytes + 4095) / 4096;
+
         use x86_64::structures::paging::FrameAllocator;
-        let f0 = phys::BumpAllocator.allocate_frame().expect("vq alloc 0");
-        let f1 = phys::BumpAllocator.allocate_frame().expect("vq alloc 1");
-        let phys_addr = f0.start_address().as_u64();
-        let virt0 = phys::phys_to_virt(f0.start_address()).as_u64() as usize;
-        let virt1 = phys::phys_to_virt(f1.start_address()).as_u64() as usize;
-        core::ptr::write_bytes(virt0 as *mut u8, 0, 4096);
-        core::ptr::write_bytes(virt1 as *mut u8, 0, 4096);
+        let mut base_phys = 0u64;
+        let mut base_virt = 0usize;
+        for i in 0..n_pages {
+            let f = phys::BumpAllocator.allocate_frame().expect("vq alloc");
+            if i == 0 {
+                base_phys = f.start_address().as_u64();
+                base_virt = phys::phys_to_virt(f.start_address()).as_u64() as usize;
+            }
+            let v = phys::phys_to_virt(f.start_address()).as_mut_ptr::<u8>();
+            core::ptr::write_bytes(v, 0, 4096);
+        }
 
-        DEVICE.descs = virt0 as *mut VqDesc;
-        DEVICE.avail = (virt0 + 256) as *mut VqAvail; // after 16 descriptors * 16 bytes
-        DEVICE.used = virt1 as *mut VqUsed; // page-aligned at next page
+        DEVICE.descs = base_virt as *mut VqDesc;
+        DEVICE.avail = (base_virt + desc_bytes) as *mut VqAvail;
+        DEVICE.used = (base_virt + used_offset) as *mut VqUsed;
+        let phys_addr = base_phys;
 
-        // Tell the device: queue size and PFN
-        write_reg16(io_base, REG_QUEUE_SIZE, QUEUE_SIZE as u16);
+        crate::serial_println!("[virtio-blk] VQ: {} pages, desc@0 avail@{} used@{}",
+            n_pages, desc_bytes, used_offset);
+
+        // Tell the device the PFN (QUEUE_SIZE is read-only in legacy virtio)
         write_reg32(io_base, REG_QUEUE_ADDR, (phys_addr / 4096) as u32);
 
         // Set DRIVER_OK to indicate we're ready
@@ -208,10 +222,6 @@ pub fn read_sector(sector: u64, buf: &mut [u8; 512]) -> Result<(), &'static str>
         // Notify device
         write_reg16(io_base, REG_QUEUE_NOTIFY, 0);
 
-        let before_used = core::ptr::read_volatile(&(*DEVICE.used).idx);
-        crate::serial_println!("[virtio-blk] submitted read sector {}, avail.idx={}, used.idx={}, last_used={}",
-            sector, (*DEVICE.avail).idx, before_used, DEVICE.last_used_idx);
-
         // Poll for completion
         for _ in 0..50_000_000u32 {
             core::sync::atomic::fence(Ordering::SeqCst);
@@ -228,7 +238,7 @@ pub fn read_sector(sector: u64, buf: &mut [u8; 512]) -> Result<(), &'static str>
     }
 }
 
-/// Read multiple sectors.
+/// Read multiple sectors into a buffer.
 pub fn read_sectors(start_sector: u64, buf: &mut [u8]) -> Result<usize, &'static str> {
     let total = buf.len() / 512;
     let mut sector_buf = [0u8; 512];

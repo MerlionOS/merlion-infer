@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const GGUF_MAGIC: u32 = 0x46475547; // "GGUF" in LE
+const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" as LE u32 (bytes: 47 47 55 46)
 
 /// GGUF metadata value types.
 #[derive(Debug, Clone, Copy, PartialEq)]
