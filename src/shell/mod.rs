@@ -110,6 +110,8 @@ fn dispatch(input: &str) {
         "gpu-info" => cmd_gpu_info(),
         "gpu-test" => cmd_gpu_test(),
         "gpu-fw-load" => cmd_gpu_fw_load(),
+        "gpu-dispatch" => cmd_gpu_dispatch(),
+        "lsusb" => cmd_lsusb(),
         "dmesg" => crate::log::dmesg(),
         "config" => crate::config::show(),
         "reboot" => crate::arch::x86_64::acpi::reboot(),
@@ -141,9 +143,12 @@ fn cmd_help() {
     crate::serial_println!("  ip         — show IP address");
     crate::serial_println!("  ss         — show TCP connections");
     crate::serial_println!("GPU:");
-    crate::serial_println!("  gpu-info   — GPU status");
-    crate::serial_println!("  gpu-test   — compute queue diagnostics");
-    crate::serial_println!("  gpu-fw-load — load MEC firmware from disk");
+    crate::serial_println!("  gpu-info     — GPU status");
+    crate::serial_println!("  gpu-test     — compute queue diagnostics");
+    crate::serial_println!("  gpu-fw-load  — load MEC firmware from disk");
+    crate::serial_println!("  gpu-dispatch — test GPU compute dispatch");
+    crate::serial_println!("USB:");
+    crate::serial_println!("  lsusb        — USB devices");
     crate::serial_println!("Debug:");
     crate::serial_println!("  dmesg      — kernel log");
     crate::serial_println!("  config     — show configuration");
@@ -566,6 +571,51 @@ fn cmd_gpu_info() {
         if crate::drivers::gpu::compute::is_ready() {
             crate::serial_println!("Compute queue: ready");
         }
+    }
+}
+
+fn cmd_lsusb() {
+    if crate::drivers::xhci::is_detected() {
+        crate::serial_println!("{}", crate::drivers::xhci::info());
+    } else {
+        crate::serial_println!("No xHCI controller detected");
+    }
+}
+
+fn cmd_gpu_dispatch() {
+    if !crate::drivers::gpu::compute::is_ready() {
+        crate::serial_println!("[gpu-dispatch] Compute queue not ready");
+        if !crate::drivers::gpu::discovery::is_detected() {
+            crate::serial_println!("[gpu-dispatch] No GPU detected");
+        } else if !crate::drivers::gpu::compute::has_firmware() {
+            crate::serial_println!("[gpu-dispatch] Run 'gpu-fw-load' first");
+        }
+        return;
+    }
+
+    crate::serial_println!("[gpu-dispatch] Preparing NOP kernel...");
+
+    let kernel = crate::drivers::gpu::shader::nop_kernel();
+    let kernel_phys = match crate::drivers::gpu::shader::prepare_for_dispatch(&kernel) {
+        Some(addr) => addr,
+        None => { crate::serial_println!("[gpu-dispatch] Failed to allocate kernel page"); return; }
+    };
+
+    let packet = crate::drivers::gpu::compute::AqlDispatchPacket::dispatch_1d(
+        kernel_phys,
+        0, // no kernargs for NOP
+        64, // 64 work-items = 1 wavefront
+        64, // workgroup size = 64
+    );
+
+    crate::serial_println!("[gpu-dispatch] Submitting NOP dispatch...");
+    let ok = crate::drivers::gpu::compute::submit_dispatch(&packet);
+    if ok {
+        crate::serial_println!("[gpu-dispatch] Packet submitted to queue");
+        crate::serial_println!("[gpu-dispatch] Checking HQD status...");
+        crate::drivers::gpu::compute::print_status();
+    } else {
+        crate::serial_println!("[gpu-dispatch] Submit failed");
     }
 }
 
