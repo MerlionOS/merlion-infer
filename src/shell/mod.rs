@@ -109,6 +109,7 @@ fn dispatch(input: &str) {
         "ss" => cmd_ss(),
         "gpu-info" => cmd_gpu_info(),
         "gpu-test" => cmd_gpu_test(),
+        "gpu-fw-load" => cmd_gpu_fw_load(),
         "dmesg" => crate::log::dmesg(),
         "config" => crate::config::show(),
         "reboot" => crate::arch::x86_64::acpi::reboot(),
@@ -142,6 +143,7 @@ fn cmd_help() {
     crate::serial_println!("GPU:");
     crate::serial_println!("  gpu-info   — GPU status");
     crate::serial_println!("  gpu-test   — compute queue diagnostics");
+    crate::serial_println!("  gpu-fw-load — load MEC firmware from disk");
     crate::serial_println!("Debug:");
     crate::serial_println!("  dmesg      — kernel log");
     crate::serial_println!("  config     — show configuration");
@@ -475,24 +477,28 @@ fn cmd_ai_bench() {
 
     let sampler = crate::inference::sampler::Sampler::greedy();
 
-    // Prefill benchmark: process a 16-token prompt
-    let prefill_prompt = "The quick brown fox";
+    // Prefill benchmark: process prompt tokens
+    let prefill_prompt = "The quick brown fox jumps over the lazy dog";
     let (prefill_result, prefill_ticks) = crate::inference::bench::measure(|| {
         crate::inference::state::with_engine(|engine| {
             let tok = crate::inference::tokenizer::global();
             let tokens = tok.encode(prefill_prompt);
             let n = tokens.len();
             drop(tok);
-            // Run forward pass for each prompt token
             for (i, &t) in tokens.iter().enumerate() {
                 engine.forward(t, i);
             }
             n
         })
     });
-
     let prefill_tokens = prefill_result.unwrap_or(0);
-    let _prefill_secs = prefill_ticks as f32 / crate::arch::x86_64::timer::PIT_FREQUENCY_HZ as f32;
+
+    // TTFT: time for first token after a prompt (single forward pass)
+    let (_, ttft_ticks) = crate::inference::bench::measure(|| {
+        crate::inference::state::with_engine(|engine| {
+            engine.forward(0, 0);
+        })
+    });
 
     // Decode benchmark: generate 32 tokens
     let decode_tokens = 32;
@@ -502,13 +508,12 @@ fn cmd_ai_bench() {
         })
     });
 
-    let _decode_secs = decode_ticks as f32 / crate::arch::x86_64::timer::PIT_FREQUENCY_HZ as f32;
-
     let result = crate::inference::bench::BenchResult {
         prefill_tokens,
         prefill_ticks,
         decode_tokens,
         decode_ticks,
+        ttft_ticks,
         peak_memory_bytes: crate::memory::heap::used(),
     };
 
@@ -561,6 +566,27 @@ fn cmd_gpu_info() {
         if crate::drivers::gpu::compute::is_ready() {
             crate::serial_println!("Compute queue: ready");
         }
+    }
+}
+
+fn cmd_gpu_fw_load() {
+    if !crate::drivers::gpu::discovery::is_detected() {
+        crate::serial_println!("[gpu-fw-load] No GPU detected");
+        return;
+    }
+    if crate::drivers::gpu::compute::has_firmware() {
+        crate::serial_println!("[gpu-fw-load] MEC firmware already loaded");
+        return;
+    }
+
+    let ok = crate::drivers::gpu::firmware::load_from_disk();
+    if ok {
+        crate::serial_println!("[gpu-fw-load] Firmware loaded successfully");
+        crate::serial_println!("[gpu-fw-load] Re-initializing compute queue...");
+        crate::drivers::gpu::compute::init();
+    } else {
+        crate::serial_println!("[gpu-fw-load] Failed to load firmware");
+        crate::serial_println!("[gpu-fw-load] Prepare with: ./tools/write_firmware.sh polaris11_mec.bin disk.img");
     }
 }
 

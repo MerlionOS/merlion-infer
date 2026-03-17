@@ -4,6 +4,7 @@ pub mod regs;
 pub mod info;
 pub mod vram;
 pub mod compute;
+pub mod firmware;
 
 /// Initialize GPU subsystem: discover, map MMIO, read status.
 pub fn init() {

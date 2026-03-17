@@ -22,8 +22,9 @@ run: build
 		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
 		-kernel $(KERNEL)
 
-# Run in QEMU with framebuffer display (SDL window + serial)
-run-gui: build
+# Run in QEMU with framebuffer display via Limine ISO.
+# Must boot from ISO (not -kernel) so Limine provides the GOP framebuffer.
+run-gui: image
 	qemu-system-x86_64 \
 		-machine q35 \
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
@@ -31,7 +32,7 @@ run-gui: build
 		-serial stdio \
 		-display sdl \
 		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
-		-kernel $(KERNEL)
+		-cdrom merlionos-inference.iso
 
 # Run with network (virtio-net, port 8080 forwarded)
 run-net: build

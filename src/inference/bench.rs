@@ -1,5 +1,5 @@
 /// Inference benchmarking.
-/// Measures prefill and decode throughput.
+/// Measures prefill and decode throughput with structured output.
 
 use crate::arch::x86_64::timer;
 
@@ -8,6 +8,7 @@ pub struct BenchResult {
     pub prefill_ticks: u64,
     pub decode_tokens: usize,
     pub decode_ticks: u64,
+    pub ttft_ticks: u64,
     pub peak_memory_bytes: usize,
 }
 
@@ -24,13 +25,44 @@ impl BenchResult {
         self.decode_tokens as f32 / secs
     }
 
+    pub fn ttft_ms(&self) -> f32 {
+        self.ttft_ticks as f32 / timer::PIT_FREQUENCY_HZ as f32 * 1000.0
+    }
+
     pub fn report(&self) {
-        crate::serial_println!("[bench] Prefill: {} tokens in {} ticks ({:.1} tok/s)",
-            self.prefill_tokens, self.prefill_ticks, self.prefill_tok_per_sec());
-        crate::serial_println!("[bench] Decode:  {} tokens in {} ticks ({:.1} tok/s)",
-            self.decode_tokens, self.decode_ticks, self.decode_tok_per_sec());
-        crate::serial_println!("[bench] Peak memory: {} KiB",
-            self.peak_memory_bytes / 1024);
+        let backend = crate::inference::kernels::dispatch::backend_name();
+
+        crate::serial_println!("╔══════════════════════════════════════╗");
+        crate::serial_println!("║     MerlionOS Inference Benchmark    ║");
+        crate::serial_println!("╠══════════════════════════════════════╣");
+
+        // Model info
+        if let Some(info) = crate::inference::state::with_engine(|e| {
+            (e.config.dim, e.config.n_layers, e.config.n_heads, e.config.vocab_size,
+             e.weights.is_quantized, e.weights.memory_bytes(), e.state.memory_bytes())
+        }) {
+            let (dim, layers, heads, vocab, quantized, w_bytes, s_bytes) = info;
+            let quant = if quantized { "Q4_0" } else { "F32" };
+            crate::serial_println!("║ Model: dim={} L={} H={} V={}", dim, layers, heads, vocab);
+            crate::serial_println!("║ Quant: {} | Weights: {} MiB | State: {} MiB",
+                quant, w_bytes / (1024*1024), s_bytes / (1024*1024));
+        }
+
+        crate::serial_println!("║ Backend: {}", backend);
+        crate::serial_println!("╠══════════════════════════════════════╣");
+        crate::serial_println!("║ Prefill: {:>4} tokens | {:>7.1} tok/s",
+            self.prefill_tokens, self.prefill_tok_per_sec());
+        crate::serial_println!("║ Decode:  {:>4} tokens | {:>7.1} tok/s",
+            self.decode_tokens, self.decode_tok_per_sec());
+        crate::serial_println!("║ TTFT:    {:>7.1} ms", self.ttft_ms());
+        crate::serial_println!("╠══════════════════════════════════════╣");
+
+        let heap_used = crate::memory::heap::used();
+        let heap_total = crate::memory::heap::heap_size();
+        crate::serial_println!("║ Heap: {} / {} MiB ({:.0}%)",
+            heap_used / (1024*1024), heap_total / (1024*1024),
+            heap_used as f32 / heap_total as f32 * 100.0);
+        crate::serial_println!("╚══════════════════════════════════════╝");
     }
 }
 
