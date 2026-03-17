@@ -1,3 +1,5 @@
 target/
 *.img
 *.iso
+models/
+iso_root/
