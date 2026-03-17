@@ -115,29 +115,42 @@ pub fn init() {
             crate::serial_println!("[virtio-blk] queue not available"); return;
         }
 
-        // Allocate virtqueue memory
-        let vq_size = core::mem::size_of::<VqDesc>() * QUEUE_SIZE
-            + core::mem::size_of::<VqAvail>()
-            + core::mem::size_of::<VqUsed>();
-        let vq_mem = vec![0u8; vq_size + 4096];
-        let vq_ptr = vq_mem.as_ptr() as usize;
-        let vq_aligned = (vq_ptr + 4095) & !4095;
-        core::mem::forget(vq_mem);
+        // Allocate VQ memory from the frame allocator. We need the physical address
+        // known, and the layout must match what virtio legacy expects:
+        //   PFN * 4096 + 0:     descriptor table (16 * queue_size bytes)
+        //   PFN * 4096 + desc:  available ring (6 + 2 * queue_size bytes)
+        //   align(above, 4096): used ring
+        // With QUEUE_SIZE=16: desc=256, avail=38, total=294 → used at offset 4096
+        // So we need 2 contiguous pages.
+        //
+        // The bump allocator gives sequential frames from a contiguous region,
+        // so allocating 2 frames in sequence gives contiguous physical pages.
+        use x86_64::structures::paging::FrameAllocator;
+        let f0 = phys::BumpAllocator.allocate_frame().expect("vq alloc 0");
+        let f1 = phys::BumpAllocator.allocate_frame().expect("vq alloc 1");
+        let phys_addr = f0.start_address().as_u64();
+        let virt0 = phys::phys_to_virt(f0.start_address()).as_u64() as usize;
+        let virt1 = phys::phys_to_virt(f1.start_address()).as_u64() as usize;
+        core::ptr::write_bytes(virt0 as *mut u8, 0, 4096);
+        core::ptr::write_bytes(virt1 as *mut u8, 0, 4096);
 
-        DEVICE.descs = vq_aligned as *mut VqDesc;
-        DEVICE.avail = (vq_aligned + core::mem::size_of::<VqDesc>() * QUEUE_SIZE) as *mut VqAvail;
-        let used_offset = vq_aligned + core::mem::size_of::<VqDesc>() * QUEUE_SIZE
-            + core::mem::size_of::<VqAvail>();
-        let used_aligned = (used_offset + 4095) & !4095;
-        DEVICE.used = used_aligned as *mut VqUsed;
+        DEVICE.descs = virt0 as *mut VqDesc;
+        DEVICE.avail = (virt0 + 256) as *mut VqAvail; // after 16 descriptors * 16 bytes
+        DEVICE.used = virt1 as *mut VqUsed; // page-aligned at next page
 
-        let phys_addr = vq_aligned as u64 - phys::hhdm_offset();
+        // Tell the device: queue size and PFN
+        write_reg16(io_base, REG_QUEUE_SIZE, QUEUE_SIZE as u16);
         write_reg32(io_base, REG_QUEUE_ADDR, (phys_addr / 4096) as u32);
 
+        // Set DRIVER_OK to indicate we're ready
         write_reg8(io_base, REG_DEVICE_STATUS,
             virtio::VIRTIO_STATUS_ACKNOWLEDGE
             | virtio::VIRTIO_STATUS_DRIVER
             | virtio::VIRTIO_STATUS_DRIVER_OK);
+
+        let dev_status = read_reg8(io_base, REG_DEVICE_STATUS);
+        crate::serial_println!("[virtio-blk] VQ phys={:#x} PFN={:#x} status={:#x}",
+            phys_addr, phys_addr / 4096, dev_status);
 
         INITIALIZED.store(true, Ordering::SeqCst);
     }
@@ -148,29 +161,43 @@ pub fn init() {
 pub fn read_sector(sector: u64, buf: &mut [u8; 512]) -> Result<(), &'static str> {
     if !INITIALIZED.load(Ordering::SeqCst) { return Err("virtio-blk: not initialized"); }
 
+    // Use a physical frame for DMA bounce buffer.
+    use x86_64::structures::paging::FrameAllocator;
+    let frame = phys::BumpAllocator.allocate_frame().ok_or("virtio-blk: alloc failed")?;
+    let page_phys = frame.start_address().as_u64();
+    let page_virt = phys::phys_to_virt(frame.start_address()).as_mut_ptr::<u8>();
+
     unsafe {
+        core::ptr::write_bytes(page_virt, 0, 4096);
+
+        // Write request header at offset 0
+        let header_ptr = page_virt as *mut VirtioBlkReqHeader;
+        (*header_ptr).type_ = VIRTIO_BLK_T_IN;
+        (*header_ptr).reserved = 0;
+        (*header_ptr).sector = sector;
+
         let io_base = DEVICE.io_base;
-        let header = VirtioBlkReqHeader { type_: VIRTIO_BLK_T_IN, reserved: 0, sector };
-        let status: u8 = 0xFF;
 
-        let header_phys = &header as *const _ as u64 - phys::hhdm_offset();
-        let data_phys = buf.as_ptr() as u64 - phys::hhdm_offset();
-        let status_phys = &status as *const _ as u64 - phys::hhdm_offset();
-
+        // Descriptor 0: header (device reads)
         (*DEVICE.descs.add(0)) = VqDesc {
-            addr: header_phys,
-            len: core::mem::size_of::<VirtioBlkReqHeader>() as u32,
+            addr: page_phys,
+            len: 16,
             flags: virtio::VIRTQ_DESC_F_NEXT, next: 1,
         };
+        // Descriptor 1: data (device writes)
         (*DEVICE.descs.add(1)) = VqDesc {
-            addr: data_phys, len: 512,
+            addr: page_phys + 0x200,
+            len: 512,
             flags: virtio::VIRTQ_DESC_F_NEXT | virtio::VIRTQ_DESC_F_WRITE, next: 2,
         };
+        // Descriptor 2: status (device writes)
         (*DEVICE.descs.add(2)) = VqDesc {
-            addr: status_phys, len: 1,
+            addr: page_phys + 0x400,
+            len: 1,
             flags: virtio::VIRTQ_DESC_F_WRITE, next: 0,
         };
 
+        // Submit to available ring
         let avail = &mut *DEVICE.avail;
         let avail_idx = avail.idx;
         avail.ring[(avail_idx as usize) % QUEUE_SIZE] = 0;
@@ -178,14 +205,22 @@ pub fn read_sector(sector: u64, buf: &mut [u8; 512]) -> Result<(), &'static str>
         avail.idx = avail_idx.wrapping_add(1);
         core::sync::atomic::fence(Ordering::SeqCst);
 
+        // Notify device
         write_reg16(io_base, REG_QUEUE_NOTIFY, 0);
 
+        let before_used = core::ptr::read_volatile(&(*DEVICE.used).idx);
+        crate::serial_println!("[virtio-blk] submitted read sector {}, avail.idx={}, used.idx={}, last_used={}",
+            sector, (*DEVICE.avail).idx, before_used, DEVICE.last_used_idx);
+
         // Poll for completion
-        for _ in 0..10_000_000u32 {
-            let used = &*DEVICE.used;
-            if used.idx != DEVICE.last_used_idx {
-                DEVICE.last_used_idx = used.idx;
-                return if status == 0 { Ok(()) } else { Err("virtio-blk: I/O error") };
+        for _ in 0..50_000_000u32 {
+            core::sync::atomic::fence(Ordering::SeqCst);
+            let used_idx = core::ptr::read_volatile(&(*DEVICE.used).idx);
+            if used_idx != DEVICE.last_used_idx {
+                DEVICE.last_used_idx = used_idx;
+                let status_byte = core::ptr::read_volatile(page_virt.add(0x400));
+                core::ptr::copy_nonoverlapping(page_virt.add(0x200), buf.as_mut_ptr(), 512);
+                return if status_byte == 0 { Ok(()) } else { Err("virtio-blk: I/O error") };
             }
             core::hint::spin_loop();
         }
@@ -216,6 +251,7 @@ pub fn info() -> String {
     }
 }
 
+unsafe fn read_reg8(base: u16, offset: u16) -> u8 { Port::<u8>::new(base + offset).read() }
 unsafe fn read_reg32(base: u16, offset: u16) -> u32 { Port::<u32>::new(base + offset).read() }
 unsafe fn read_reg16(base: u16, offset: u16) -> u16 { Port::<u16>::new(base + offset).read() }
 unsafe fn write_reg32(base: u16, offset: u16, val: u32) { Port::<u32>::new(base + offset).write(val); }

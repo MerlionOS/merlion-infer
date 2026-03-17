@@ -163,7 +163,14 @@ extern "C" fn _start() -> ! {
     merlion_infer::serial_println!();
     merlion_infer::shell::prompt();
 
-    loop { x86_64::instructions::hlt(); }
+    // Main loop: poll serial input as fallback (IRQ4 may not fire in all QEMU configs)
+    loop {
+        if merlion_infer::arch::x86_64::serial::SERIAL1.lock().data_available() {
+            let byte = merlion_infer::arch::x86_64::serial::SERIAL1.lock().read_byte();
+            merlion_infer::shell::handle_serial_byte(byte);
+        }
+        x86_64::instructions::hlt();
+    }
 }
 
 fn halt() -> ! {

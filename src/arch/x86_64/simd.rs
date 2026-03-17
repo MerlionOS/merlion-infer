@@ -10,25 +10,33 @@ static HAS_AMX: AtomicBool = AtomicBool::new(false);
 /// Initialize SIMD state: enable SSE, AVX via CR0/CR4/XCR0.
 /// Must be called early in boot, before any SIMD code runs.
 pub fn init() {
+    crate::serial_println!("[simd] Initializing SIMD state...");
+
     unsafe {
-        // CR0: clear EM (bit 2), set MP (bit 1)
+        // CR0: clear EM (bit 2), set MP (bit 1) — required for SSE
         let mut cr0: u64;
         core::arch::asm!("mov {}, cr0", out(reg) cr0);
         cr0 &= !(1 << 2); // Clear EM
         cr0 |= 1 << 1;    // Set MP
         core::arch::asm!("mov cr0, {}", in(reg) cr0);
 
-        // CR4: set OSFXSR (bit 9), OSXMMEXCPT (bit 10), OSXSAVE (bit 18)
+        // CR4: set OSFXSR (bit 9) and OSXMMEXCPT (bit 10) for SSE
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4);
-        cr4 |= (1 << 9) | (1 << 10) | (1 << 18);
+        cr4 |= (1 << 9) | (1 << 10);
+
+        // Only set OSXSAVE (bit 18) if CPUID says XSAVE is available
+        let (_, _, ecx1, _) = cpuid(1);
+        let has_xsave = ecx1 & (1 << 26) != 0;
+        let has_osxsave = ecx1 & (1 << 27) != 0;
+
+        if has_xsave {
+            cr4 |= 1 << 18; // OSXSAVE
+        }
         core::arch::asm!("mov cr4, {}", in(reg) cr4);
 
         // XCR0: enable SSE (bit 1) and AVX (bit 2) state saving
-        // Only do this if OSXSAVE is supported
-        let (_, _, ecx, _) = cpuid(1);
-        if ecx & (1 << 27) != 0 {
-            // OSXSAVE supported
+        if has_xsave && has_osxsave {
             let mut xcr0: u64;
             core::arch::asm!("xgetbv", in("ecx") 0u32, out("eax") xcr0, out("edx") _);
             xcr0 |= (1 << 1) | (1 << 2); // SSE + AVX
