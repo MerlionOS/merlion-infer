@@ -5,7 +5,6 @@
 use crate::drivers::{pci, virtio};
 use crate::memory::phys;
 use alloc::string::String;
-use alloc::vec;
 use x86_64::instructions::port::Port;
 use core::sync::atomic::{AtomicBool, Ordering};
 

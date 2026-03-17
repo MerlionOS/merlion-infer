@@ -237,72 +237,21 @@ fn cmd_lsblk() {
 }
 
 fn cmd_ai_load() {
-    // Try to read from disk and parse GGUF header
-    if !crate::drivers::nvme::is_detected() && !crate::drivers::virtio_blk::is_detected() {
-        crate::serial_println!("[ai-load] no block device available");
+    if crate::inference::state::is_loaded() {
+        crate::serial_println!("[ai-load] Model already loaded. Use 'ai-info' to see details.");
         return;
     }
 
-    crate::serial_println!("[ai-load] Reading GGUF header from disk LBA 0...");
-
-    // Read first 64 KiB to parse GGUF header
-    // Read 16 KiB to parse GGUF header. Not enough for full metadata
-    // (tokenizer vocab needs ~3 MiB) but validates the parsing pipeline.
-    let header_size = 16 * 1024;
-    let mut header_buf = alloc::vec![0u8; header_size];
-
-    let result = if crate::drivers::virtio_blk::is_detected() {
-        crate::drivers::virtio_blk::read_sectors(0, &mut header_buf)
-    } else {
-        crate::drivers::nvme::read_sectors(0, &mut header_buf)
-    };
-
-    match result {
-        Ok(bytes) => crate::serial_println!("[ai-load] Read {} bytes from disk", bytes),
-        Err(e) => { crate::serial_println!("[ai-load] Read error: {}", e); return; }
-    }
-
-    // Parse GGUF
-    match crate::inference::gguf::parse(&header_buf) {
-        Ok(model) => {
-            crate::serial_println!("[ai-load] GGUF v{}", model.version);
-            crate::serial_println!("[ai-load] Metadata: {} entries", model.metadata.len());
-            crate::serial_println!("[ai-load] Tensors: {}", model.tensors.len());
-            crate::serial_println!("[ai-load] Data offset: {} bytes", model.data_offset);
-
-            // Print key metadata
-            if let Some(arch) = model.get_metadata("general.architecture") {
-                crate::serial_println!("[ai-load] Architecture: {:?}", arch);
-            }
-            if let Some(name) = model.get_metadata("general.name") {
-                crate::serial_println!("[ai-load] Model name: {:?}", name);
-            }
-
-            let total_bytes = model.total_tensor_bytes();
-            crate::serial_println!("[ai-load] Total tensor data: {} MiB",
-                total_bytes / (1024 * 1024));
-
-            // Show first few tensors
-            let show = core::cmp::min(5, model.tensors.len());
-            for t in &model.tensors[..show] {
-                crate::serial_println!("  {} [{}] {:?} ({} bytes)",
-                    t.name, t.tensor_type.name(),
-                    &t.dims[..t.n_dims as usize], t.byte_size());
-            }
-            if model.tensors.len() > show {
-                crate::serial_println!("  ... and {} more", model.tensors.len() - show);
-            }
-        }
-        Err(e) => {
-            crate::serial_println!("[ai-load] GGUF parse error: {}", e);
-            crate::serial_println!("[ai-load] First 16 bytes: {:02x?}", &header_buf[..16]);
-        }
-    }
+    // Load built-in test model (tiny Llama, dim=32, 1 layer, vocab=256)
+    crate::serial_println!("[ai-load] Loading built-in test model...");
+    crate::inference::test_model::setup_byte_tokenizer();
+    let engine = crate::inference::test_model::create_test_engine();
+    crate::inference::state::load(engine);
+    crate::serial_println!("[ai-load] Ready. Try: ai Hello");
 }
 
 fn cmd_ai_info() {
-    crate::serial_println!("Model: not loaded");
-    crate::serial_println!("Use 'ai-load' to load a GGUF model from disk");
+    crate::serial_println!("{}", crate::inference::state::model_info());
 }
 
 fn cmd_ai(prompt: &str) {
@@ -310,16 +259,75 @@ fn cmd_ai(prompt: &str) {
         crate::serial_println!("Usage: ai <prompt text>");
         return;
     }
-    crate::serial_println!("[ai] Model not loaded. Use 'ai-load' first.");
-    crate::serial_println!("[ai] Once loaded, this will generate text from your prompt.");
+    if !crate::inference::state::is_loaded() {
+        crate::serial_println!("[ai] No model loaded. Run 'ai-load' first.");
+        return;
+    }
+
+    let max_tokens = 64;
+    let sampler = crate::inference::sampler::Sampler::new(0.8, 0.9);
+
+    let result = crate::inference::state::with_engine(|engine| {
+        crate::inference::generate::generate(engine, prompt, max_tokens, &sampler)
+    });
+
+    if let Some((_text, n_tokens, elapsed_ticks)) = result {
+        let elapsed_secs = elapsed_ticks as f32 / crate::arch::x86_64::timer::PIT_FREQUENCY_HZ as f32;
+        let tok_per_sec = if elapsed_secs > 0.0 { n_tokens as f32 / elapsed_secs } else { 0.0 };
+        crate::serial_println!("[Generated {} tokens in {:.1}s | {:.1} tok/s | scalar]",
+            n_tokens, elapsed_secs, tok_per_sec);
+    }
 }
 
 fn cmd_ai_bench() {
-    crate::serial_println!("[ai-bench] Model not loaded. Use 'ai-load' first.");
-    crate::serial_println!("[ai-bench] Once loaded, this will benchmark:");
-    crate::serial_println!("  - Prefill speed (tokens/sec)");
-    crate::serial_println!("  - Decode speed (tokens/sec)");
-    crate::serial_println!("  - Peak memory usage");
+    if !crate::inference::state::is_loaded() {
+        crate::serial_println!("[ai-bench] No model loaded. Run 'ai-load' first.");
+        return;
+    }
+
+    crate::serial_println!("[ai-bench] Running benchmark...");
+
+    let sampler = crate::inference::sampler::Sampler::greedy();
+
+    // Prefill benchmark: process a 16-token prompt
+    let prefill_prompt = "The quick brown fox";
+    let (prefill_result, prefill_ticks) = crate::inference::bench::measure(|| {
+        crate::inference::state::with_engine(|engine| {
+            let tok = crate::inference::tokenizer::global();
+            let tokens = tok.encode(prefill_prompt);
+            let n = tokens.len();
+            drop(tok);
+            // Run forward pass for each prompt token
+            for (i, &t) in tokens.iter().enumerate() {
+                engine.forward(t, i);
+            }
+            n
+        })
+    });
+
+    let prefill_tokens = prefill_result.unwrap_or(0);
+    let _prefill_secs = prefill_ticks as f32 / crate::arch::x86_64::timer::PIT_FREQUENCY_HZ as f32;
+
+    // Decode benchmark: generate 32 tokens
+    let decode_tokens = 32;
+    let (_, decode_ticks) = crate::inference::bench::measure(|| {
+        crate::inference::state::with_engine(|engine| {
+            crate::inference::generate::generate(engine, "Hello", decode_tokens, &sampler)
+        })
+    });
+
+    let _decode_secs = decode_ticks as f32 / crate::arch::x86_64::timer::PIT_FREQUENCY_HZ as f32;
+
+    let result = crate::inference::bench::BenchResult {
+        prefill_tokens,
+        prefill_ticks,
+        decode_tokens,
+        decode_ticks,
+        peak_memory_bytes: crate::memory::heap::used(),
+    };
+
+    crate::serial_println!();
+    result.report();
 }
 
 fn cmd_ai_serve(args: &str) {
