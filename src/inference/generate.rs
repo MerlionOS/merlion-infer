@@ -45,9 +45,8 @@ pub fn generate(
             // Still processing prompt — teacher-force
             prompt_tokens[pos + 1]
         } else {
-            // Generate
-            let mut logits_copy = engine.state.logits.clone();
-            sampler.sample(&mut logits_copy, &mut rng_state)
+            // Generate — sample directly from logits (no clone)
+            sampler.sample(&mut engine.state.logits, &mut rng_state)
         };
 
         // If we're past the prompt, output the token

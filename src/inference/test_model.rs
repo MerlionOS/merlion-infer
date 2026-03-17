@@ -87,7 +87,7 @@ pub fn create_test_engine() -> LlamaEngine {
     crate::serial_println!("[test-model] Weights: {} KiB, State: {} KiB",
         weights.memory_bytes() / 1024, state.memory_bytes() / 1024);
 
-    LlamaEngine { config, state, weights }
+    LlamaEngine::new(config, state, weights)
 }
 
 /// Set up byte-level tokenizer (token i = byte i).

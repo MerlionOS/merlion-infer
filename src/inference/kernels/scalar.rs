@@ -45,12 +45,27 @@ pub fn softmax(x: &mut [f32]) {
 
 /// Matrix-vector multiply: out = W * x
 /// W is (n_out, n_in) stored row-major as f32.
+/// Unrolled 4x for better ILP.
 pub fn matmul(out: &mut [f32], w: &[f32], x: &[f32], n_in: usize, n_out: usize) {
     for i in 0..n_out {
-        let mut val = 0.0f32;
-        let row = &w[i * n_in..(i + 1) * n_in];
-        for j in 0..n_in {
+        let row = &w[i * n_in..];
+        let mut sum0 = 0.0f32;
+        let mut sum1 = 0.0f32;
+        let mut sum2 = 0.0f32;
+        let mut sum3 = 0.0f32;
+        let mut j = 0;
+        let end4 = n_in & !3; // round down to multiple of 4
+        while j < end4 {
+            sum0 += row[j] * x[j];
+            sum1 += row[j+1] * x[j+1];
+            sum2 += row[j+2] * x[j+2];
+            sum3 += row[j+3] * x[j+3];
+            j += 4;
+        }
+        let mut val = sum0 + sum1 + sum2 + sum3;
+        while j < n_in {
             val += row[j] * x[j];
+            j += 1;
         }
         out[i] = val;
     }

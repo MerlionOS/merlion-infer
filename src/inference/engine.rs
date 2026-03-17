@@ -1,7 +1,7 @@
 /// LLM inference engine implementing the Llama architecture.
 /// Based on llama2.c by Andrej Karpathy, adapted for no_std Rust.
 ///
-/// Supports Llama/Llama2/Llama3/SmolLM models in Q4_0 and F32 formats.
+/// Optimized: pre-computed tensor indices, zero allocation in forward pass.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -11,15 +11,15 @@ use crate::inference::kernels::scalar;
 /// Model configuration parsed from GGUF metadata.
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
-    pub dim: usize,         // transformer dimension (embedding size)
-    pub hidden_dim: usize,  // FFN hidden dimension
-    pub n_layers: usize,    // number of transformer layers
-    pub n_heads: usize,     // number of attention heads
-    pub n_kv_heads: usize,  // number of KV heads (for GQA)
-    pub vocab_size: usize,  // vocabulary size
-    pub max_seq_len: usize, // maximum sequence length
-    pub head_dim: usize,    // dim / n_heads
-    pub kv_dim: usize,      // head_dim * n_kv_heads
+    pub dim: usize,
+    pub hidden_dim: usize,
+    pub n_layers: usize,
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub vocab_size: usize,
+    pub max_seq_len: usize,
+    pub head_dim: usize,
+    pub kv_dim: usize,
 }
 
 impl ModelConfig {
@@ -45,7 +45,6 @@ impl ModelConfig {
         let max_seq_len = get_u32(&alloc::format!("{}.context_length", prefix))
             .unwrap_or(2048) as usize;
 
-        // Vocab size from tokenizer metadata
         let vocab_size = model.get_metadata("tokenizer.ggml.tokens")
             .and_then(|v| match v {
                 crate::inference::gguf::GgufValue::Array(arr) => Some(arr.len()),
@@ -65,21 +64,18 @@ impl ModelConfig {
 
 /// Run state: pre-allocated buffers for a single forward pass.
 pub struct RunState {
-    // Current activations
-    pub x: Vec<f32>,       // (dim,) activation at current position
-    pub xb: Vec<f32>,      // (dim,) after rmsnorm
-    pub xb2: Vec<f32>,     // (dim,) second buffer
-    pub hb: Vec<f32>,      // (hidden_dim,) FFN hidden
-    pub hb2: Vec<f32>,     // (hidden_dim,) FFN second hidden
-    pub q: Vec<f32>,       // (dim,) query
-    pub k: Vec<f32>,       // (kv_dim,) key
-    pub v: Vec<f32>,       // (kv_dim,) value
-    pub att: Vec<f32>,     // (n_heads, max_seq_len) attention scores
-    pub logits: Vec<f32>,  // (vocab_size,) output logits
-
-    // KV cache
-    pub key_cache: Vec<f32>,   // (n_layers, max_seq_len, kv_dim)
-    pub value_cache: Vec<f32>, // (n_layers, max_seq_len, kv_dim)
+    pub x: Vec<f32>,
+    pub xb: Vec<f32>,
+    pub xb2: Vec<f32>,
+    pub hb: Vec<f32>,
+    pub hb2: Vec<f32>,
+    pub q: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    pub att: Vec<f32>,
+    pub logits: Vec<f32>,
+    pub key_cache: Vec<f32>,
+    pub value_cache: Vec<f32>,
 }
 
 impl RunState {
@@ -100,7 +96,6 @@ impl RunState {
         }
     }
 
-    /// Memory usage in bytes.
     pub fn memory_bytes(&self) -> usize {
         (self.x.len() + self.xb.len() + self.xb2.len()
          + self.hb.len() + self.hb2.len()
@@ -110,40 +105,65 @@ impl RunState {
     }
 }
 
-/// Model weights — pointers into the loaded GGUF data.
-/// Weights are NOT copied; they reference the memory-mapped model data.
+/// Pre-computed tensor index for a single layer (no allocations in forward pass).
+struct LayerIndex {
+    attn_norm: usize,  // index into tensor_map
+    attn_q: usize,
+    attn_k: usize,
+    attn_v: usize,
+    attn_output: usize,
+    ffn_norm: usize,
+    ffn_gate: usize,
+    ffn_up: usize,
+    ffn_down: usize,
+}
+
+/// Pre-computed tensor indices for the entire model.
+struct TensorIndex {
+    token_embd: usize,
+    layers: Vec<LayerIndex>,
+    output_norm: usize,
+    output: usize,
+}
+
 pub struct ModelWeights {
-    /// Raw model data (owned, loaded from disk)
     pub data: Vec<u8>,
-    /// Data offset within the GGUF file where tensor data begins
     pub data_offset: usize,
-    /// Tensor name → (offset_in_data, byte_size) mapping
     pub tensor_map: Vec<(String, usize, usize)>,
-    /// Whether weights are quantized (Q4_0) or float32
     pub is_quantized: bool,
 }
 
 impl ModelWeights {
-    /// Get raw bytes for a tensor by name.
-    pub fn get_tensor_bytes(&self, name: &str) -> Option<&[u8]> {
-        for (tname, offset, size) in &self.tensor_map {
-            if tname == name {
-                let start = self.data_offset + *offset;
-                let end = start + *size;
-                if end <= self.data.len() {
-                    return Some(&self.data[start..end]);
-                }
-            }
+    fn find_index(&self, name: &str) -> usize {
+        for (i, (tname, _, _)) in self.tensor_map.iter().enumerate() {
+            if tname == name { return i; }
         }
-        None
+        usize::MAX // sentinel: tensor not found
     }
 
-    /// Get tensor as f32 slice (only for non-quantized weights).
-    pub fn get_tensor_f32(&self, name: &str) -> Option<&[f32]> {
-        let bytes = self.get_tensor_bytes(name)?;
+    fn get_bytes_by_index(&self, idx: usize) -> Option<&[u8]> {
+        if idx == usize::MAX { return None; }
+        let (_, offset, size) = &self.tensor_map[idx];
+        let start = self.data_offset + *offset;
+        let end = start + *size;
+        if end <= self.data.len() { Some(&self.data[start..end]) } else { None }
+    }
+
+    fn get_f32_by_index(&self, idx: usize) -> Option<&[f32]> {
+        let bytes = self.get_bytes_by_index(idx)?;
         let ptr = bytes.as_ptr() as *const f32;
         let len = bytes.len() / 4;
         Some(unsafe { core::slice::from_raw_parts(ptr, len) })
+    }
+
+    pub fn get_tensor_bytes(&self, name: &str) -> Option<&[u8]> {
+        let idx = self.find_index(name);
+        self.get_bytes_by_index(idx)
+    }
+
+    pub fn get_tensor_f32(&self, name: &str) -> Option<&[f32]> {
+        let idx = self.find_index(name);
+        self.get_f32_by_index(idx)
     }
 
     pub fn memory_bytes(&self) -> usize {
@@ -156,24 +176,49 @@ pub struct LlamaEngine {
     pub config: ModelConfig,
     pub state: RunState,
     pub weights: ModelWeights,
+    index: TensorIndex,
 }
 
 impl LlamaEngine {
-    /// Perform a single forward pass for token at position `pos`.
-    /// Returns logits over the vocabulary.
-    pub fn forward(&mut self, token: u32, pos: usize) -> &[f32] {
-        let cfg = &self.config;
-        let dim = cfg.dim;
-        let hidden_dim = cfg.hidden_dim;
-        let head_dim = cfg.head_dim;
-        let kv_dim = cfg.kv_dim;
-        let n_heads = cfg.n_heads;
-        let n_kv_heads = cfg.n_kv_heads;
-        let kv_mul = n_heads / n_kv_heads; // GQA multiplier
+    /// Create engine with pre-computed tensor indices.
+    pub fn new(config: ModelConfig, state: RunState, weights: ModelWeights) -> Self {
+        let mut layers = Vec::with_capacity(config.n_layers);
+        for l in 0..config.n_layers {
+            layers.push(LayerIndex {
+                attn_norm: weights.find_index(&alloc::format!("blk.{}.attn_norm.weight", l)),
+                attn_q: weights.find_index(&alloc::format!("blk.{}.attn_q.weight", l)),
+                attn_k: weights.find_index(&alloc::format!("blk.{}.attn_k.weight", l)),
+                attn_v: weights.find_index(&alloc::format!("blk.{}.attn_v.weight", l)),
+                attn_output: weights.find_index(&alloc::format!("blk.{}.attn_output.weight", l)),
+                ffn_norm: weights.find_index(&alloc::format!("blk.{}.ffn_norm.weight", l)),
+                ffn_gate: weights.find_index(&alloc::format!("blk.{}.ffn_gate.weight", l)),
+                ffn_up: weights.find_index(&alloc::format!("blk.{}.ffn_up.weight", l)),
+                ffn_down: weights.find_index(&alloc::format!("blk.{}.ffn_down.weight", l)),
+            });
+        }
 
-        // 1. Token embedding: copy row `token` from embedding table
-        let embed_name = "token_embd.weight";
-        if let Some(embed) = self.weights.get_tensor_f32(embed_name) {
+        let index = TensorIndex {
+            token_embd: weights.find_index("token_embd.weight"),
+            layers,
+            output_norm: weights.find_index("output_norm.weight"),
+            output: weights.find_index("output.weight"),
+        };
+
+        Self { config, state, weights, index }
+    }
+
+    /// Perform a single forward pass for token at position `pos`.
+    /// Zero allocations — all tensor lookups use pre-computed indices.
+    pub fn forward(&mut self, token: u32, pos: usize) -> &[f32] {
+        let dim = self.config.dim;
+        let hidden_dim = self.config.hidden_dim;
+        let head_dim = self.config.head_dim;
+        let kv_dim = self.config.kv_dim;
+        let n_heads = self.config.n_heads;
+        let kv_mul = n_heads / self.config.n_kv_heads;
+
+        // 1. Token embedding
+        if let Some(embed) = self.weights.get_f32_by_index(self.index.token_embd) {
             let start = token as usize * dim;
             if start + dim <= embed.len() {
                 self.state.x.copy_from_slice(&embed[start..start + dim]);
@@ -181,38 +226,33 @@ impl LlamaEngine {
         }
 
         // 2. Transformer layers
-        for layer in 0..cfg.n_layers {
-            let l = layer; // layer index for weight name construction
+        for layer in 0..self.config.n_layers {
+            let li = &self.index.layers[layer];
 
             // Attention rmsnorm
-            let attn_norm_name = alloc::format!("blk.{}.attn_norm.weight", l);
-            if let Some(w) = self.weights.get_tensor_f32(&attn_norm_name) {
+            if let Some(w) = self.weights.get_f32_by_index(li.attn_norm) {
                 scalar::rmsnorm(&mut self.state.xb, &self.state.x, w);
             }
 
             // QKV projections
-            let wq_name = alloc::format!("blk.{}.attn_q.weight", l);
-            let wk_name = alloc::format!("blk.{}.attn_k.weight", l);
-            let wv_name = alloc::format!("blk.{}.attn_v.weight", l);
-
             if self.weights.is_quantized {
-                if let Some(wq) = self.weights.get_tensor_bytes(&wq_name) {
+                if let Some(wq) = self.weights.get_bytes_by_index(li.attn_q) {
                     scalar::matmul_q4_0(&mut self.state.q, wq, &self.state.xb, dim, dim);
                 }
-                if let Some(wk) = self.weights.get_tensor_bytes(&wk_name) {
+                if let Some(wk) = self.weights.get_bytes_by_index(li.attn_k) {
                     scalar::matmul_q4_0(&mut self.state.k, wk, &self.state.xb, dim, kv_dim);
                 }
-                if let Some(wv) = self.weights.get_tensor_bytes(&wv_name) {
+                if let Some(wv) = self.weights.get_bytes_by_index(li.attn_v) {
                     scalar::matmul_q4_0(&mut self.state.v, wv, &self.state.xb, dim, kv_dim);
                 }
             } else {
-                if let Some(wq) = self.weights.get_tensor_f32(&wq_name) {
+                if let Some(wq) = self.weights.get_f32_by_index(li.attn_q) {
                     scalar::matmul(&mut self.state.q, wq, &self.state.xb, dim, dim);
                 }
-                if let Some(wk) = self.weights.get_tensor_f32(&wk_name) {
+                if let Some(wk) = self.weights.get_f32_by_index(li.attn_k) {
                     scalar::matmul(&mut self.state.k, wk, &self.state.xb, dim, kv_dim);
                 }
-                if let Some(wv) = self.weights.get_tensor_f32(&wv_name) {
+                if let Some(wv) = self.weights.get_f32_by_index(li.attn_v) {
                     scalar::matmul(&mut self.state.v, wv, &self.state.xb, dim, kv_dim);
                 }
             }
@@ -221,85 +261,89 @@ impl LlamaEngine {
             scalar::rope(&mut self.state.q, &mut self.state.k, pos, dim, head_dim, kv_dim);
 
             // Cache KV
-            let kv_cache_offset = l * cfg.max_seq_len * kv_dim + pos * kv_dim;
-            if kv_cache_offset + kv_dim <= self.state.key_cache.len() {
-                self.state.key_cache[kv_cache_offset..kv_cache_offset + kv_dim]
+            let kv_offset = layer * self.config.max_seq_len * kv_dim + pos * kv_dim;
+            if kv_offset + kv_dim <= self.state.key_cache.len() {
+                self.state.key_cache[kv_offset..kv_offset + kv_dim]
                     .copy_from_slice(&self.state.k[..kv_dim]);
-                self.state.value_cache[kv_cache_offset..kv_cache_offset + kv_dim]
+                self.state.value_cache[kv_offset..kv_offset + kv_dim]
                     .copy_from_slice(&self.state.v[..kv_dim]);
             }
 
             // Multi-head attention
             self.state.xb.fill(0.0);
             for h in 0..n_heads {
-                let kv_h = h / kv_mul; // GQA: which KV head this Q head maps to
+                let kv_h = h / kv_mul;
+                let q_off = h * head_dim;
+                let att_off = h * self.config.max_seq_len;
 
-                let q_offset = h * head_dim;
-                let q_head = &self.state.q[q_offset..q_offset + head_dim];
-
-                // Compute attention scores for all positions up to `pos`
-                let att_offset = h * cfg.max_seq_len;
+                // Attention scores
                 for t in 0..=pos {
-                    let kc_offset = l * cfg.max_seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
+                    let kc_off = layer * self.config.max_seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
                     let mut score = 0.0f32;
-                    for d in 0..head_dim {
-                        score += q_head[d] * self.state.key_cache[kc_offset + d];
+                    let q_slice = &self.state.q[q_off..q_off + head_dim];
+                    let k_slice = &self.state.key_cache[kc_off..kc_off + head_dim];
+                    // Manual dot product — avoid iterator overhead
+                    let mut i = 0;
+                    while i + 3 < head_dim {
+                        score += q_slice[i] * k_slice[i]
+                               + q_slice[i+1] * k_slice[i+1]
+                               + q_slice[i+2] * k_slice[i+2]
+                               + q_slice[i+3] * k_slice[i+3];
+                        i += 4;
                     }
-                    self.state.att[att_offset + t] = score / libm::sqrtf(head_dim as f32);
+                    while i < head_dim {
+                        score += q_slice[i] * k_slice[i];
+                        i += 1;
+                    }
+                    self.state.att[att_off + t] = score / libm::sqrtf(head_dim as f32);
                 }
 
-                // Softmax over attention scores
-                scalar::softmax(&mut self.state.att[att_offset..att_offset + pos + 1]);
+                // Softmax
+                scalar::softmax(&mut self.state.att[att_off..att_off + pos + 1]);
 
                 // Weighted sum of values
-                let xb_offset = h * head_dim;
+                let xb_off = h * head_dim;
                 for t in 0..=pos {
-                    let vc_offset = l * cfg.max_seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
-                    let weight = self.state.att[att_offset + t];
+                    let vc_off = layer * self.config.max_seq_len * kv_dim + t * kv_dim + kv_h * head_dim;
+                    let w = self.state.att[att_off + t];
                     for d in 0..head_dim {
-                        self.state.xb[xb_offset + d] += weight * self.state.value_cache[vc_offset + d];
+                        self.state.xb[xb_off + d] += w * self.state.value_cache[vc_off + d];
                     }
                 }
             }
 
             // Output projection
-            let wo_name = alloc::format!("blk.{}.attn_output.weight", l);
             if self.weights.is_quantized {
-                if let Some(wo) = self.weights.get_tensor_bytes(&wo_name) {
+                if let Some(wo) = self.weights.get_bytes_by_index(li.attn_output) {
                     scalar::matmul_q4_0(&mut self.state.xb2, wo, &self.state.xb, dim, dim);
                 }
             } else {
-                if let Some(wo) = self.weights.get_tensor_f32(&wo_name) {
+                if let Some(wo) = self.weights.get_f32_by_index(li.attn_output) {
                     scalar::matmul(&mut self.state.xb2, wo, &self.state.xb, dim, dim);
                 }
             }
 
-            // Residual connection
+            // Residual
             scalar::elementwise_add(&mut self.state.x, &self.state.xb2);
 
             // FFN rmsnorm
-            let ffn_norm_name = alloc::format!("blk.{}.ffn_norm.weight", l);
-            if let Some(w) = self.weights.get_tensor_f32(&ffn_norm_name) {
+            if let Some(w) = self.weights.get_f32_by_index(li.ffn_norm) {
                 scalar::rmsnorm(&mut self.state.xb, &self.state.x, w);
             }
 
-            // FFN: gate + up → SiLU → element_mul → down
-            let wg_name = alloc::format!("blk.{}.ffn_gate.weight", l);
-            let wu_name = alloc::format!("blk.{}.ffn_up.weight", l);
-            let wd_name = alloc::format!("blk.{}.ffn_down.weight", l);
-
+            // FFN
             if self.weights.is_quantized {
-                if let Some(wg) = self.weights.get_tensor_bytes(&wg_name) {
+                if let Some(wg) = self.weights.get_bytes_by_index(li.ffn_gate) {
                     scalar::matmul_q4_0(&mut self.state.hb, wg, &self.state.xb, dim, hidden_dim);
                 }
-                if let Some(wu) = self.weights.get_tensor_bytes(&wu_name) {
+                if let Some(wu) = self.weights.get_bytes_by_index(li.ffn_up) {
                     scalar::matmul_q4_0(&mut self.state.hb2, wu, &self.state.xb, dim, hidden_dim);
                 }
             } else {
-                if let Some(wg) = self.weights.get_tensor_f32(&wg_name) {
+                if let Some(wg) = self.weights.get_f32_by_index(li.ffn_gate) {
                     scalar::matmul(&mut self.state.hb, wg, &self.state.xb, dim, hidden_dim);
                 }
-                if let Some(wu) = self.weights.get_tensor_f32(&wu_name) {
+                if let Some(wu) = self.weights.get_f32_by_index(li.ffn_up) {
                     scalar::matmul(&mut self.state.hb2, wu, &self.state.xb, dim, hidden_dim);
                 }
             }
@@ -308,11 +352,11 @@ impl LlamaEngine {
             scalar::elementwise_mul(&mut self.state.hb, &self.state.hb2);
 
             if self.weights.is_quantized {
-                if let Some(wd) = self.weights.get_tensor_bytes(&wd_name) {
+                if let Some(wd) = self.weights.get_bytes_by_index(li.ffn_down) {
                     scalar::matmul_q4_0(&mut self.state.xb2, wd, &self.state.hb, hidden_dim, dim);
                 }
             } else {
-                if let Some(wd) = self.weights.get_tensor_f32(&wd_name) {
+                if let Some(wd) = self.weights.get_f32_by_index(li.ffn_down) {
                     scalar::matmul(&mut self.state.xb2, wd, &self.state.hb, hidden_dim, dim);
                 }
             }
@@ -322,22 +366,22 @@ impl LlamaEngine {
         }
 
         // Final rmsnorm
-        let final_norm_name = "output_norm.weight";
-        if let Some(w) = self.weights.get_tensor_f32(final_norm_name) {
+        if let Some(w) = self.weights.get_f32_by_index(self.index.output_norm) {
             scalar::rmsnorm(&mut self.state.xb, &self.state.x, w);
         } else {
             self.state.xb.copy_from_slice(&self.state.x);
         }
 
-        // Classifier: project to vocab
-        let output_name = "output.weight";
+        // Classifier
         if self.weights.is_quantized {
-            if let Some(wo) = self.weights.get_tensor_bytes(output_name) {
-                scalar::matmul_q4_0(&mut self.state.logits, wo, &self.state.xb, cfg.dim, cfg.vocab_size);
+            if let Some(wo) = self.weights.get_bytes_by_index(self.index.output) {
+                scalar::matmul_q4_0(&mut self.state.logits, wo, &self.state.xb,
+                    self.config.dim, self.config.vocab_size);
             }
         } else {
-            if let Some(wo) = self.weights.get_tensor_f32(output_name) {
-                scalar::matmul(&mut self.state.logits, wo, &self.state.xb, cfg.dim, cfg.vocab_size);
+            if let Some(wo) = self.weights.get_f32_by_index(self.index.output) {
+                scalar::matmul(&mut self.state.logits, wo, &self.state.xb,
+                    self.config.dim, self.config.vocab_size);
             }
         }
 
