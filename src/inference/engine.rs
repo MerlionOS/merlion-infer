@@ -6,7 +6,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use alloc::string::String;
-use crate::inference::kernels::scalar;
+use crate::inference::kernels::dispatch as scalar;
 
 /// Model configuration parsed from GGUF metadata.
 #[derive(Debug, Clone)]

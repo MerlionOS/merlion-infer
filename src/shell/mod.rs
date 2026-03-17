@@ -444,8 +444,9 @@ fn cmd_ai(prompt: &str) {
     if let Some((_text, n_tokens, elapsed_ticks)) = result {
         let elapsed_secs = elapsed_ticks as f32 / crate::arch::x86_64::timer::PIT_FREQUENCY_HZ as f32;
         let tok_per_sec = if elapsed_secs > 0.0 { n_tokens as f32 / elapsed_secs } else { 0.0 };
-        crate::serial_println!("[Generated {} tokens in {:.1}s | {:.1} tok/s | scalar]",
-            n_tokens, elapsed_secs, tok_per_sec);
+        crate::serial_println!("[Generated {} tokens in {:.1}s | {:.1} tok/s | {}]",
+            n_tokens, elapsed_secs, tok_per_sec,
+            crate::inference::kernels::dispatch::backend_name());
     }
 }
 

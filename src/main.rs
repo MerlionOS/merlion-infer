@@ -152,7 +152,10 @@ extern "C" fn _start() -> ! {
     merlion_infer::drivers::virtio_net::init();
     merlion_infer::net::init();
 
-    // Phase 10: GPU
+    // Phase 10: Kernel dispatch (AVX2 vs scalar)
+    merlion_infer::inference::kernels::dispatch::init();
+
+    // Phase 11: GPU
     merlion_infer::drivers::gpu::init();
 
     // Phase 11: Ready
