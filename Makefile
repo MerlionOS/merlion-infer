@@ -3,6 +3,16 @@
 KERNEL := target/x86_64-unknown-none/debug/merlion-infer
 KERNEL_REL := target/x86_64-unknown-none/release/merlion-infer
 
+# Auto-detect UEFI firmware path
+OVMF_CODE := $(shell \
+	for f in \
+		/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+		/opt/homebrew/share/qemu/edk2-x86_64-secure-code.fd \
+		/usr/share/OVMF/OVMF_CODE.fd \
+		/usr/share/edk2/x64/OVMF_CODE.fd \
+		/usr/share/qemu/edk2-x86_64-code.fd \
+	; do [ -f "$$f" ] && echo "$$f" && break; done)
+
 # Build kernel (debug)
 build:
 	cargo build
@@ -18,7 +28,7 @@ run: build
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
 		-nographic \
-		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+		-bios $(OVMF_CODE) \
 		-kernel $(KERNEL)
 
 # Run in QEMU with framebuffer display via Limine ISO.
@@ -30,7 +40,7 @@ run-gui: image
 		-m 1G \
 		-serial stdio \
 		-display sdl \
-		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+		-bios $(OVMF_CODE) \
 		-cdrom merlionos-inference.iso
 
 # Run with network (virtio-net, port 8080 forwarded)
@@ -40,7 +50,7 @@ run-net: build
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
 		-nographic \
-		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+		-bios $(OVMF_CODE) \
 		-kernel $(KERNEL) \
 		-netdev user,id=n0,hostfwd=tcp::8080-:8080 \
 		-device virtio-net-pci,netdev=n0
@@ -52,7 +62,7 @@ run-disk: build
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
 		-nographic \
-		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+		-bios $(OVMF_CODE) \
 		-kernel $(KERNEL) \
 		-drive file=disk.img,format=raw,if=virtio
 
@@ -63,7 +73,7 @@ run-full: build
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
 		-nographic \
-		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+		-bios $(OVMF_CODE) \
 		-kernel $(KERNEL) \
 		-drive file=disk.img,format=raw,if=virtio \
 		-netdev user,id=n0,hostfwd=tcp::8080-:8080 \
@@ -76,7 +86,7 @@ run-kvm: build
 		-enable-kvm -cpu host \
 		-m 4G \
 		-nographic \
-		-bios /usr/share/OVMF/OVMF_CODE.fd \
+		-bios $(OVMF_CODE) \
 		-kernel $(KERNEL) \
 		-drive file=disk.img,format=raw,if=virtio \
 		-netdev user,id=n0,hostfwd=tcp::8080-:8080 \
