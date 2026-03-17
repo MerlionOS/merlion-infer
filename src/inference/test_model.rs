@@ -28,6 +28,7 @@ pub fn create_test_engine() -> LlamaEngine {
         max_seq_len: MAX_SEQ,
         head_dim: HEAD_DIM,
         kv_dim: KV_DIM,
+        eos_tokens: alloc::vec![0, 2],
     };
 
     // Build weight data: all tensors concatenated as f32

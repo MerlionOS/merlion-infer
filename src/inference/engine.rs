@@ -20,6 +20,8 @@ pub struct ModelConfig {
     pub max_seq_len: usize,
     pub head_dim: usize,
     pub kv_dim: usize,
+    /// EOS token IDs (stop generation when any of these are produced).
+    pub eos_tokens: Vec<u32>,
 }
 
 impl ModelConfig {
@@ -55,9 +57,34 @@ impl ModelConfig {
         let head_dim = dim / n_heads;
         let kv_dim = head_dim * n_kv_heads;
 
+        // Extract EOS token IDs from metadata
+        let mut eos_tokens = Vec::new();
+        if let Some(eos_id) = model.get_metadata("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.as_u32())
+        {
+            eos_tokens.push(eos_id);
+        }
+        // Some models use an array of EOS tokens
+        if let Some(crate::inference::gguf::GgufValue::Array(arr)) =
+            model.get_metadata("tokenizer.ggml.eos_token_id")
+        {
+            for v in arr {
+                if let Some(id) = v.as_u32() {
+                    if !eos_tokens.contains(&id) {
+                        eos_tokens.push(id);
+                    }
+                }
+            }
+        }
+        // Default fallback: token 0 and token 2 are common EOS
+        if eos_tokens.is_empty() {
+            eos_tokens.push(0);
+            eos_tokens.push(2);
+        }
+
         Ok(Self {
             dim, hidden_dim, n_layers, n_heads, n_kv_heads,
-            vocab_size, max_seq_len, head_dim, kv_dim,
+            vocab_size, max_seq_len, head_dim, kv_dim, eos_tokens,
         })
     }
 }
@@ -197,11 +224,16 @@ impl LlamaEngine {
             });
         }
 
+        // Weight tying: if output.weight is missing, reuse token_embd.weight
+        let token_embd = weights.find_index("token_embd.weight");
+        let output = weights.find_index("output.weight");
+        let output = if output == usize::MAX { token_embd } else { output };
+
         let index = TensorIndex {
-            token_embd: weights.find_index("token_embd.weight"),
+            token_embd,
             layers,
             output_norm: weights.find_index("output_norm.weight"),
-            output: weights.find_index("output.weight"),
+            output,
         };
 
         Self { config, state, weights, index }

@@ -108,6 +108,7 @@ fn dispatch(input: &str) {
         "ip" => cmd_ip(),
         "ss" => cmd_ss(),
         "gpu-info" => cmd_gpu_info(),
+        "gpu-test" => cmd_gpu_test(),
         "dmesg" => crate::log::dmesg(),
         "config" => crate::config::show(),
         "reboot" => crate::arch::x86_64::acpi::reboot(),
@@ -140,6 +141,7 @@ fn cmd_help() {
     crate::serial_println!("  ss         — show TCP connections");
     crate::serial_println!("GPU:");
     crate::serial_println!("  gpu-info   — GPU status");
+    crate::serial_println!("  gpu-test   — compute queue diagnostics");
     crate::serial_println!("Debug:");
     crate::serial_println!("  dmesg      — kernel log");
     crate::serial_println!("  config     — show configuration");
@@ -558,6 +560,25 @@ fn cmd_gpu_info() {
         crate::drivers::gpu::info::print_diagnostics();
         if crate::drivers::gpu::compute::is_ready() {
             crate::serial_println!("Compute queue: ready");
+        }
+    }
+}
+
+fn cmd_gpu_test() {
+    if !crate::drivers::gpu::discovery::is_detected() {
+        crate::serial_println!("[gpu-test] No GPU detected");
+        return;
+    }
+
+    crate::serial_println!("[gpu-test] Compute queue status:");
+    crate::drivers::gpu::compute::print_status();
+
+    if crate::drivers::gpu::compute::is_ready() {
+        crate::serial_println!();
+        crate::serial_println!("[gpu-test] Queue is ready for dispatch");
+        if !crate::drivers::gpu::compute::has_firmware() {
+            crate::serial_println!("[gpu-test] But MEC firmware is not loaded");
+            crate::serial_println!("[gpu-test] Dispatches will be queued but not executed");
         }
     }
 }

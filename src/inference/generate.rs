@@ -61,8 +61,8 @@ pub fn generate(
 
         token = next_token;
 
-        // Stop on EOS (token 2 is common EOS, but varies by model)
-        if next_token == 2 || next_token == 0 {
+        // Stop on EOS token
+        if engine.config.eos_tokens.contains(&next_token) {
             break;
         }
     }

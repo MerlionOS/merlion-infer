@@ -1,4 +1,4 @@
-.PHONY: build release run run-gui run-net run-disk run-full run-kvm image clean
+.PHONY: build release run run-gui run-net run-disk run-full run-kvm image disk clean
 
 KERNEL := target/x86_64-unknown-none/debug/merlion-infer
 KERNEL_REL := target/x86_64-unknown-none/release/merlion-infer
@@ -85,6 +85,10 @@ run-kvm: build
 		-drive file=disk.img,format=raw,if=virtio \
 		-netdev user,id=n0,hostfwd=tcp::8080-:8080 \
 		-device virtio-net-pci,netdev=n0
+
+# Download SmolLM2-135M and create disk.img
+disk:
+	./tools/download_model.sh
 
 # Build bootable ISO image
 image: release

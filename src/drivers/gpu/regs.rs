@@ -86,3 +86,59 @@ pub const CP_HQD_PQ_CONTROL: usize = 0xDD40;
 pub const CP_HQD_ACTIVE: usize = 0xDD14;
 /// Number of MEC pipes and queues.
 pub const CP_MEC_ME1_PIPE0_INT_CNTL: usize = 0xDB00;
+
+// ============================================================
+// MEC firmware upload registers (GFX v8.0 / Polaris)
+// ============================================================
+
+/// MEC microcode address (write shader program counter).
+pub const CP_MEC_ME1_UCODE_ADDR: usize = 0xDE40;
+/// MEC microcode data (write instruction dwords).
+pub const CP_MEC_ME1_UCODE_DATA: usize = 0xDE44;
+/// MEC2 microcode address.
+pub const CP_MEC_ME2_UCODE_ADDR: usize = 0xDE48;
+/// MEC2 microcode data.
+pub const CP_MEC_ME2_UCODE_DATA: usize = 0xDE4C;
+
+// ============================================================
+// HQD (Hardware Queue Descriptor) additional registers
+// ============================================================
+
+/// HQD VMID — which VMID this queue uses.
+pub const CP_HQD_VMID: usize = 0xDD18;
+/// HQD IB (Indirect Buffer) control.
+pub const CP_HQD_IB_CONTROL: usize = 0xDD60;
+/// HQD dequeue request (to deactivate queue).
+pub const CP_HQD_DEQUEUE_REQUEST: usize = 0xDD68;
+/// HQD SEMA_CMD (queue semaphore).
+pub const CP_HQD_SEMA_CMD: usize = 0xDD20;
+/// HQD EOP (End Of Pipe) base address.
+pub const CP_HQD_EOP_BASE_ADDR: usize = 0xDD80;
+pub const CP_HQD_EOP_BASE_ADDR_HI: usize = 0xDD84;
+/// HQD EOP control.
+pub const CP_HQD_EOP_CONTROL: usize = 0xDD88;
+/// HQD EOP read/write pointer.
+pub const CP_HQD_EOP_RPTR: usize = 0xDD8C;
+pub const CP_HQD_EOP_WPTR: usize = 0xDD90;
+
+// ============================================================
+// Doorbell registers
+// ============================================================
+
+/// Doorbell range for the BIF (Bus Interface).
+pub const BIF_DOORBELL_RANGE: usize = 0x5A00;
+/// Doorbell enable.
+pub const BIF_DOORBELL_ENABLE: usize = 0x5A04;
+/// HQD doorbell offset.
+pub const CP_HQD_PQ_DOORBELL: usize = 0xDD28;
+
+// ============================================================
+// SRBM (System Register Bus Manager) — per-pipe selection
+// ============================================================
+
+/// Select which MEC/pipe/queue the HQD registers refer to.
+pub const SRBM_GFX_CNTL: usize = 0x30;
+/// SRBM status (pipe busy bits).
+pub const SRBM_STATUS: usize = 0x34;
+/// SRBM status 2.
+pub const SRBM_STATUS2: usize = 0x38;
