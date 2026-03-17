@@ -68,7 +68,7 @@ run-gui: debug-iso
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
 		-serial stdio \
-		-display sdl \
+		-display cocoa \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-cdrom $(ISO)
 
