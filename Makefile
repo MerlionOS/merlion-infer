@@ -28,7 +28,7 @@ run: build
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
 		-nographic \
-		-bios $(OVMF_CODE) \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-kernel $(KERNEL)
 
 # Run in QEMU with framebuffer display via Limine ISO.
@@ -40,7 +40,7 @@ run-gui: image
 		-m 1G \
 		-serial stdio \
 		-display sdl \
-		-bios $(OVMF_CODE) \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-cdrom merlionos-inference.iso
 
 # Run with network (virtio-net, port 8080 forwarded)
@@ -50,7 +50,7 @@ run-net: build
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
 		-nographic \
-		-bios $(OVMF_CODE) \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-kernel $(KERNEL) \
 		-netdev user,id=n0,hostfwd=tcp::8080-:8080 \
 		-device virtio-net-pci,netdev=n0
@@ -62,7 +62,7 @@ run-disk: build
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
 		-nographic \
-		-bios $(OVMF_CODE) \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-kernel $(KERNEL) \
 		-drive file=disk.img,format=raw,if=virtio
 
@@ -73,7 +73,7 @@ run-full: build
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
 		-nographic \
-		-bios $(OVMF_CODE) \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-kernel $(KERNEL) \
 		-drive file=disk.img,format=raw,if=virtio \
 		-netdev user,id=n0,hostfwd=tcp::8080-:8080 \
@@ -86,7 +86,7 @@ run-kvm: build
 		-enable-kvm -cpu host \
 		-m 4G \
 		-nographic \
-		-bios $(OVMF_CODE) \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-kernel $(KERNEL) \
 		-drive file=disk.img,format=raw,if=virtio \
 		-netdev user,id=n0,hostfwd=tcp::8080-:8080 \
