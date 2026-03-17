@@ -5,6 +5,9 @@ edition = "2021"
 authors = ["MerlionOS Contributors"]
 description = "A bare-metal OS purpose-built for LLM inference"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(avx2_available)'] }
+
 [dependencies]
 x86_64 = "0.14"
 spin = "0.9"

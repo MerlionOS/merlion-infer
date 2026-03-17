@@ -2,7 +2,6 @@
 /// Reads hardware registers to report GPU status.
 
 use super::{mmio, regs};
-use alloc::string::String;
 
 /// GPU family identification from register probing.
 pub struct GpuInfo {
@@ -53,10 +52,9 @@ pub fn read_temperature() -> u32 {
 pub fn read_sclk_mhz() -> u32 {
     if !mmio::is_initialized() { return 0; }
     // Read from RLC GPU clock counter
-    let clk = mmio::read32(regs::RLC_GPU_CLOCK_32);
-    // This is a free-running counter, not the actual frequency.
-    // Actual frequency requires SMU communication which is complex.
-    // Return 0 to indicate "not available via simple register read"
+    let _clk = mmio::read32(regs::RLC_GPU_CLOCK_32);
+    // Free-running counter, not actual frequency.
+    // Actual frequency requires SMU communication.
     0
 }
 
