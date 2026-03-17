@@ -77,17 +77,60 @@ pub fn scan() {
     }
 
     let chip_name = match dev.device_id {
+        // RDNA3 (Navi 3x)
         0x744C => "Navi 31 (RX 7900 XT/XTX)",
         0x7480 => "Navi 31 (RX 7900 GRE)",
+        0x7470..=0x747F => "Navi 32 (RX 7800/7700)",
+        0x7460..=0x746F => "Navi 33 (RX 7600)",
+        // RDNA2 (Navi 2x)
         0x73DF => "Navi 21 (RX 6800/6900)",
         0x73BF => "Navi 21 (RX 6900 XT)",
+        0x73EF => "Navi 23 (RX 6600)",
+        // RDNA1 (Navi 1x)
         0x7340 => "Navi 14 (RX 5500)",
         0x731F => "Navi 10 (RX 5700)",
+        // GCN 5 — Vega
+        0x6860..=0x687F => "Vega 10 (RX Vega 56/64)",
+        0x69A0..=0x69AF => "Vega 12",
+        0x66A0..=0x66AF => "Vega 20 (Radeon VII)",
+        // GCN 4 — Polaris (MacBook Pro 2017)
+        0x67C0..=0x67CF => "Polaris 10 (RX 480/470)",
+        0x67DF => "Polaris 10 (RX 480/580)",
+        0x67E0..=0x67EF => "Polaris 11 (RX 460/560)",
+        0x67FF => "Polaris 11 (RX 560/Pro 560)",
+        0x6FDF => "Polaris 12 (RX 550)",
+        // GCN 3 — Tonga/Fiji
+        0x6920..=0x692F => "Tonga (R9 380)",
+        0x7300 => "Fiji (R9 Fury/Nano)",
         _ => "Unknown AMD GPU",
     };
-    crate::serial_println!("[gpu] Chip: {} (device_id={:#06x})", chip_name, dev.device_id);
-    crate::serial_println!("[gpu] Status: discovered (driver not yet active)");
-    crate::serial_println!("[gpu] Phase 6 TODO: firmware load, engine init, compute queue");
+
+    let arch = match dev.device_id {
+        0x7440..=0x74FF => "RDNA3",
+        0x73A0..=0x73FF => "RDNA2",
+        0x7310..=0x7340 => "RDNA1",
+        0x66A0..=0x66AF | 0x6860..=0x687F | 0x69A0..=0x69AF => "GCN5 (Vega)",
+        0x67C0..=0x67FF | 0x6FD0..=0x6FDF => "GCN4 (Polaris)",
+        0x6920..=0x692F | 0x7300 => "GCN3",
+        _ => "Unknown",
+    };
+    crate::serial_println!("[gpu] Chip: {} [{}] (device_id={:#06x})", chip_name, arch, dev.device_id);
+
+    match arch {
+        "RDNA3" => {
+            crate::serial_println!("[gpu] Compute: RDNA3 supported (Phase 6)");
+        }
+        "GCN4 (Polaris)" => {
+            crate::serial_println!("[gpu] Compute: GCN4/Polaris — gfx803 ISA, 4GB VRAM");
+            crate::serial_println!("[gpu] Wavefront: 64 threads, CU-based");
+        }
+        "GCN5 (Vega)" => {
+            crate::serial_println!("[gpu] Compute: GCN5/Vega — gfx900 ISA");
+        }
+        _ => {
+            crate::serial_println!("[gpu] Compute: not yet supported for {}", arch);
+        }
+    }
 }
 
 pub fn is_detected() -> bool { DETECTED.load(Ordering::SeqCst) }
