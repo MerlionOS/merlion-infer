@@ -1,4 +1,4 @@
-.PHONY: build release run run-net run-disk run-full run-kvm image clean
+.PHONY: build release run run-gui run-net run-disk run-full run-kvm image clean
 
 KERNEL := target/x86_64-unknown-none/debug/merlion-infer
 KERNEL_REL := target/x86_64-unknown-none/release/merlion-infer
@@ -19,6 +19,17 @@ run: build
 		-m 1G \
 		-serial stdio \
 		-nographic \
+		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+		-kernel $(KERNEL)
+
+# Run in QEMU with framebuffer display (SDL window + serial)
+run-gui: build
+	qemu-system-x86_64 \
+		-machine q35 \
+		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
+		-m 1G \
+		-serial stdio \
+		-display sdl \
 		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
 		-kernel $(KERNEL)
 

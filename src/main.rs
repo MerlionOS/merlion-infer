@@ -38,6 +38,14 @@ static mut HHDM_REQUEST: LimineHhdmRequest = LimineHhdmRequest {
 };
 
 #[used]
+#[link_section = ".limine_requests"]
+static mut FRAMEBUFFER_REQUEST: LimineFramebufferRequest = LimineFramebufferRequest {
+    id: [0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0x9d5827dcd881dd75, 0xa3148604f6fab11b],
+    revision: 0,
+    response: core::ptr::null(),
+};
+
+#[used]
 #[link_section = ".limine_requests_end"]
 static mut REQUESTS_END_MARKER: [u64; 2] = [0xadc0e0531bb10d03, 0x9572709f31764c62];
 
@@ -64,6 +72,27 @@ extern "C" fn _start() -> ! {
 
     // Phase 1: Serial
     merlion_infer::arch::x86_64::serial::SERIAL1.lock().init();
+    merlion_infer::serial_println!("[boot] Serial OK");
+
+    // Phase 1b: Framebuffer console (for bare-metal without serial)
+    unsafe {
+        let resp = (*(&raw const FRAMEBUFFER_REQUEST)).response;
+        if !resp.is_null() && (*resp).framebuffer_count > 0 {
+            let fb = *(*resp).framebuffers;
+            merlion_infer::arch::x86_64::framebuffer::init(
+                (*fb).address,
+                (*fb).width,
+                (*fb).height,
+                (*fb).pitch,
+                (*fb).bpp,
+            );
+            merlion_infer::serial_println!("[boot] Framebuffer: {}x{} @ {}bpp",
+                (*fb).width, (*fb).height, (*fb).bpp);
+        } else {
+            merlion_infer::serial_println!("[boot] No framebuffer (serial only)");
+        }
+    }
+
     merlion_infer::serial_println!("MerlionOS Inference v0.1.0");
     merlion_infer::serial_println!("Zero overhead. Maximum throughput.");
     merlion_infer::serial_println!("[boot] Limine UEFI boot path");

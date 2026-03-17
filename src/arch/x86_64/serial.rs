@@ -91,5 +91,9 @@ pub fn _serial_print(args: fmt::Arguments) {
 
     interrupts::without_interrupts(|| {
         SERIAL1.lock().write_fmt(args).unwrap();
+        // Mirror output to framebuffer console (if available)
+        if super::framebuffer::is_ready() {
+            super::framebuffer::CONSOLE.lock().write_fmt(args).unwrap();
+        }
     });
 }

@@ -5,3 +5,5 @@ pub mod timer;
 pub mod simd;
 pub mod smp;
 pub mod acpi;
+pub mod font;
+pub mod framebuffer;

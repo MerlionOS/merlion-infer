@@ -140,6 +140,17 @@ OpenAI API ← HTTP Server ← Inference Scheduler ← Inference Engine
 - [ ] Phase 6: AMD GPU inference
 - [ ] Phase 7: Production hardening
 
+## Contributing
+
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Areas where help is especially welcome:
+- Hardware drivers (USB Ethernet, NVMe quirks)
+- AVX-512 optimized inference kernels
+- AMD GPU compute driver
+- Testing on different hardware
+- Documentation
+
 ## Links
 
 - **Hobby OS (upstream)**: [MerlionOS/merlion-kernel](https://github.com/MerlionOS/merlion-kernel)
@@ -147,7 +158,7 @@ OpenAI API ← HTTP Server ← Inference Scheduler ← Inference Engine
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
 
 ---
 
