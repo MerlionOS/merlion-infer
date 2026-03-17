@@ -88,7 +88,7 @@ pub fn handle_serial_byte(byte: u8) {
 fn dispatch(input: &str) {
     let parts: Vec<&str> = input.trim().splitn(2, ' ').collect();
     let cmd = parts[0];
-    let _args = if parts.len() > 1 { parts[1] } else { "" };
+    let args = if parts.len() > 1 { parts[1] } else { "" };
 
     match cmd {
         "help" => cmd_help(),
@@ -101,6 +101,8 @@ fn dispatch(input: &str) {
         "lsblk" => cmd_lsblk(),
         "ai-load" => cmd_ai_load(),
         "ai-info" => cmd_ai_info(),
+        "ai" => cmd_ai(args),
+        "ai-bench" => cmd_ai_bench(),
         "reboot" => crate::arch::x86_64::acpi::reboot(),
         "shutdown" => crate::arch::x86_64::acpi::shutdown(),
         "clear" => crate::serial_print!("\x1b[2J\x1b[H"),
@@ -123,6 +125,8 @@ fn cmd_help() {
     crate::serial_println!("Inference:");
     crate::serial_println!("  ai-load    — load GGUF model from disk");
     crate::serial_println!("  ai-info    — current model info");
+    crate::serial_println!("  ai <text>  — generate text");
+    crate::serial_println!("  ai-bench   — benchmark inference speed");
     crate::serial_println!("Control:");
     crate::serial_println!("  reboot     — ACPI reboot");
     crate::serial_println!("  shutdown   — ACPI shutdown");
@@ -282,4 +286,21 @@ fn cmd_ai_load() {
 fn cmd_ai_info() {
     crate::serial_println!("Model: not loaded");
     crate::serial_println!("Use 'ai-load' to load a GGUF model from disk");
+}
+
+fn cmd_ai(prompt: &str) {
+    if prompt.is_empty() {
+        crate::serial_println!("Usage: ai <prompt text>");
+        return;
+    }
+    crate::serial_println!("[ai] Model not loaded. Use 'ai-load' first.");
+    crate::serial_println!("[ai] Once loaded, this will generate text from your prompt.");
+}
+
+fn cmd_ai_bench() {
+    crate::serial_println!("[ai-bench] Model not loaded. Use 'ai-load' first.");
+    crate::serial_println!("[ai-bench] Once loaded, this will benchmark:");
+    crate::serial_println!("  - Prefill speed (tokens/sec)");
+    crate::serial_println!("  - Decode speed (tokens/sec)");
+    crate::serial_println!("  - Peak memory usage");
 }
