@@ -7,4 +7,6 @@ extern crate alloc;
 pub mod boot;
 pub mod arch;
 pub mod memory;
+pub mod drivers;
+pub mod inference;
 pub mod shell;

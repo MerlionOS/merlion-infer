@@ -144,7 +144,11 @@ extern "C" fn _start() -> ! {
     // Phase 7: SMP detection
     merlion_infer::arch::x86_64::smp::init();
 
-    // Phase 8: Ready
+    // Phase 8: Storage drivers
+    merlion_infer::drivers::nvme::init();
+    merlion_infer::drivers::virtio_blk::init();
+
+    // Phase 9: Ready
     merlion_infer::serial_println!();
     merlion_infer::serial_println!("Kernel initialization complete.");
     merlion_infer::serial_println!("Type 'help' for available commands.");

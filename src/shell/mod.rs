@@ -97,6 +97,10 @@ fn dispatch(input: &str) {
         "uptime" => cmd_uptime(),
         "cpuid" => cmd_cpuid(),
         "memmap" => cmd_memmap(),
+        "lspci" => cmd_lspci(),
+        "lsblk" => cmd_lsblk(),
+        "ai-load" => cmd_ai_load(),
+        "ai-info" => cmd_ai_info(),
         "reboot" => crate::arch::x86_64::acpi::reboot(),
         "shutdown" => crate::arch::x86_64::acpi::shutdown(),
         "clear" => crate::serial_print!("\x1b[2J\x1b[H"),
@@ -114,6 +118,12 @@ fn cmd_help() {
     crate::serial_println!("  uptime     — time since boot");
     crate::serial_println!("  cpuid      — CPU feature details");
     crate::serial_println!("  memmap     — physical memory map");
+    crate::serial_println!("  lspci      — PCI devices");
+    crate::serial_println!("  lsblk      — block devices");
+    crate::serial_println!("Inference:");
+    crate::serial_println!("  ai-load    — load GGUF model from disk");
+    crate::serial_println!("  ai-info    — current model info");
+    crate::serial_println!("Control:");
     crate::serial_println!("  reboot     — ACPI reboot");
     crate::serial_println!("  shutdown   — ACPI shutdown");
     crate::serial_println!("  clear      — clear screen");
@@ -185,4 +195,91 @@ fn cmd_memmap() {
     let alloc = crate::memory::phys::allocated_bytes();
     crate::serial_println!("Physical memory: {} MiB usable, {} KiB allocated",
         total / (1024 * 1024), alloc / 1024);
+}
+
+fn cmd_lspci() {
+    let devices = crate::drivers::pci::scan();
+    for dev in &devices {
+        crate::serial_println!("  {}", dev.summary());
+    }
+    crate::serial_println!("{} devices", devices.len());
+}
+
+fn cmd_lsblk() {
+    if crate::drivers::nvme::is_detected() {
+        crate::serial_println!("  {}", crate::drivers::nvme::info());
+    }
+    if crate::drivers::virtio_blk::is_detected() {
+        crate::serial_println!("  {}", crate::drivers::virtio_blk::info());
+    }
+    if !crate::drivers::nvme::is_detected() && !crate::drivers::virtio_blk::is_detected() {
+        crate::serial_println!("  no block devices");
+    }
+}
+
+fn cmd_ai_load() {
+    // Try to read from disk and parse GGUF header
+    if !crate::drivers::nvme::is_detected() && !crate::drivers::virtio_blk::is_detected() {
+        crate::serial_println!("[ai-load] no block device available");
+        return;
+    }
+
+    crate::serial_println!("[ai-load] Reading GGUF header from disk LBA 0...");
+
+    // Read first 64 KiB to parse GGUF header
+    let header_size = 64 * 1024;
+    let mut header_buf = alloc::vec![0u8; header_size];
+
+    let result = if crate::drivers::virtio_blk::is_detected() {
+        crate::drivers::virtio_blk::read_sectors(0, &mut header_buf)
+    } else {
+        crate::drivers::nvme::read_sectors(0, &mut header_buf)
+    };
+
+    match result {
+        Ok(bytes) => crate::serial_println!("[ai-load] Read {} bytes from disk", bytes),
+        Err(e) => { crate::serial_println!("[ai-load] Read error: {}", e); return; }
+    }
+
+    // Parse GGUF
+    match crate::inference::gguf::parse(&header_buf) {
+        Ok(model) => {
+            crate::serial_println!("[ai-load] GGUF v{}", model.version);
+            crate::serial_println!("[ai-load] Metadata: {} entries", model.metadata.len());
+            crate::serial_println!("[ai-load] Tensors: {}", model.tensors.len());
+            crate::serial_println!("[ai-load] Data offset: {} bytes", model.data_offset);
+
+            // Print key metadata
+            if let Some(arch) = model.get_metadata("general.architecture") {
+                crate::serial_println!("[ai-load] Architecture: {:?}", arch);
+            }
+            if let Some(name) = model.get_metadata("general.name") {
+                crate::serial_println!("[ai-load] Model name: {:?}", name);
+            }
+
+            let total_bytes = model.total_tensor_bytes();
+            crate::serial_println!("[ai-load] Total tensor data: {} MiB",
+                total_bytes / (1024 * 1024));
+
+            // Show first few tensors
+            let show = core::cmp::min(5, model.tensors.len());
+            for t in &model.tensors[..show] {
+                crate::serial_println!("  {} [{}] {:?} ({} bytes)",
+                    t.name, t.tensor_type.name(),
+                    &t.dims[..t.n_dims as usize], t.byte_size());
+            }
+            if model.tensors.len() > show {
+                crate::serial_println!("  ... and {} more", model.tensors.len() - show);
+            }
+        }
+        Err(e) => {
+            crate::serial_println!("[ai-load] GGUF parse error: {}", e);
+            crate::serial_println!("[ai-load] First 16 bytes: {:02x?}", &header_buf[..16]);
+        }
+    }
+}
+
+fn cmd_ai_info() {
+    crate::serial_println!("Model: not loaded");
+    crate::serial_println!("Use 'ai-load' to load a GGUF model from disk");
 }
