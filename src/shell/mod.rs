@@ -177,9 +177,10 @@ fn cmd_free() {
 
     crate::serial_println!("Physical: {} KiB allocated / {} MiB total",
         phys_alloc / 1024, phys_total / (1024 * 1024));
-    crate::serial_println!("Heap:     {} KiB used / {} KiB free / {} KiB total",
-        heap_used / 1024, heap_free / 1024,
-        crate::memory::heap::HEAP_SIZE / 1024);
+    let heap_total = crate::memory::heap::heap_size();
+    crate::serial_println!("Heap:     {} MiB used / {} MiB free / {} MiB total",
+        heap_used / (1024 * 1024), heap_free / (1024 * 1024),
+        heap_total / (1024 * 1024));
 }
 
 fn cmd_uptime() {
@@ -329,33 +330,45 @@ fn load_from_disk() -> bool {
     // Step 2: Calculate total model size and read the rest
     let total_tensor_bytes: u64 = model_info.tensors.iter().map(|t| t.byte_size()).sum();
     let total_size = model_info.data_offset + total_tensor_bytes as usize;
-    crate::serial_println!("[ai-load] Model: {} KiB total, reading...", total_size / 1024);
+    crate::serial_println!("[ai-load] Model: {} KiB ({} MiB) total", total_size / 1024, total_size / (1024*1024));
 
-    // Read full model — use single-sector reads (reliable in TCG)
+    // Check heap capacity
+    let heap_free = crate::memory::heap::free();
+    let estimated_need = total_size + total_size / 2; // weights + RunState
+    if heap_free < estimated_need {
+        crate::serial_println!("[ai-load] Insufficient heap: {} MiB free, ~{} MiB needed",
+            heap_free / (1024*1024), estimated_need / (1024*1024));
+        crate::serial_println!("[ai-load] Try running with more RAM (e.g. -m 2G)");
+        return false;
+    }
+
     let total_sectors = (total_size + 511) / 512;
     let total_bytes = total_sectors * 512;
     let mut buf = alloc::vec![0u8; total_bytes];
     // Copy what we already have
     buf[..probe_size].copy_from_slice(&probe[..probe_size]);
 
-    // Read remaining sectors one at a time
+    // Read remaining data using multi-sector DMA for speed
     if total_size > probe_size {
+        let remaining = &mut buf[probe_size..];
         let start_sector = (probe_size / 512) as u64;
-        let remaining_sectors = total_sectors - (probe_size / 512);
-        let mut sector_buf = [0u8; 512];
-        for i in 0..remaining_sectors {
-            let sector = start_sector + i as u64;
-            let result = if crate::drivers::virtio_blk::is_detected() {
-                crate::drivers::virtio_blk::read_sector(sector, &mut sector_buf)
-            } else {
-                crate::drivers::nvme::read_sector(sector, &mut sector_buf)
-            };
-            if result.is_err() {
-                crate::serial_println!("[ai-load] Read error at sector {}", sector);
+        crate::serial_println!("[ai-load] Reading {} KiB from sector {}...",
+            remaining.len() / 1024, start_sector);
+
+        let result = if crate::drivers::virtio_blk::is_detected() {
+            crate::drivers::virtio_blk::read_sectors(start_sector, remaining)
+        } else {
+            crate::drivers::nvme::read_sectors(start_sector, remaining)
+        };
+
+        match result {
+            Ok(bytes) => {
+                crate::serial_println!("[ai-load] Read {} KiB OK", bytes / 1024);
+            }
+            Err(e) => {
+                crate::serial_println!("[ai-load] Read error: {}", e);
                 return false;
             }
-            let off = (start_sector as usize + i) * 512;
-            buf[off..off + 512].copy_from_slice(&sector_buf);
         }
     }
     // Parse model config

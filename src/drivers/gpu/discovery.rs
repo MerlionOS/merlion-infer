@@ -85,7 +85,11 @@ pub fn scan() {
         // GCN 4 — Polaris (MacBook Pro 2017)
         0x67C0..=0x67CF => "Polaris 10 (RX 480/470)",
         0x67DF => "Polaris 10 (RX 480/580)",
-        0x67E0..=0x67EF => "Polaris 11 (RX 460/560)",
+        0x67E0 => "Polaris 11 (RX 460)",
+        0x67E1..=0x67E8 => "Polaris 11",
+        0x67E9 => "Polaris 11 (Pro 560, MacBook Pro)",
+        0x67EF => "Polaris 11 (Pro 555/560, MacBook Pro 2017)",
+        0x67EA..=0x67EE => "Polaris 11",
         0x67FF => "Polaris 11 (RX 560/Pro 560)",
         0x6FDF => "Polaris 12 (RX 550)",
         // GCN 3 — Tonga/Fiji
@@ -110,8 +114,16 @@ pub fn scan() {
             crate::serial_println!("[gpu] Compute: RDNA3 supported (Phase 6)");
         }
         "GCN4 (Polaris)" => {
-            crate::serial_println!("[gpu] Compute: GCN4/Polaris — gfx803 ISA, 4GB VRAM");
-            crate::serial_println!("[gpu] Wavefront: 64 threads, CU-based");
+            let (cus, vram_gb) = match dev.device_id {
+                0x67EF => (12, 2), // Polaris 11: MacBook Pro 2017 (Pro 555=12CU/2GB, Pro 560=16CU/4GB)
+                0x67E9 => (16, 4), // Pro 560
+                0x67FF => (16, 4), // RX 560
+                0x67DF => (36, 8), // RX 580
+                _ => (16, 4),
+            };
+            crate::serial_println!("[gpu] Compute: GCN4/Polaris — gfx803 ISA");
+            crate::serial_println!("[gpu] CUs: {} | VRAM: ~{} GB GDDR5 | Wavefront: 64", cus, vram_gb);
+            crate::serial_println!("[gpu] FP32 capable, usable for small GEMM offload");
         }
         "GCN5 (Vega)" => {
             crate::serial_println!("[gpu] Compute: GCN5/Vega — gfx900 ISA");

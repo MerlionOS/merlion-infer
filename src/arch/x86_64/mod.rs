@@ -7,3 +7,4 @@ pub mod smp;
 pub mod acpi;
 pub mod font;
 pub mod framebuffer;
+pub mod keyboard;

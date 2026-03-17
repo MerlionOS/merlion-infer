@@ -1,6 +1,6 @@
 /// Interrupt Descriptor Table.
-/// Handles CPU exceptions and hardware interrupts (PIT timer, serial).
-/// No keyboard handler (headless server), no syscall (no ring 3).
+/// Handles CPU exceptions and hardware interrupts (PIT timer, keyboard, serial).
+/// No syscall (no ring 3).
 
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use spin::Lazy;
@@ -13,6 +13,7 @@ const PIC_OFFSET_SECONDARY: u8 = PIC_OFFSET_PRIMARY + 8;
 #[repr(u8)]
 enum HardwareInterrupt {
     Timer = PIC_OFFSET_PRIMARY,
+    Keyboard = PIC_OFFSET_PRIMARY + 1, // IRQ1 — PS/2 keyboard
     Serial = PIC_OFFSET_PRIMARY + 4, // COM1 is IRQ4
 }
 
@@ -34,6 +35,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
 
     // Hardware interrupts
     idt[HardwareInterrupt::Timer as u8 as usize].set_handler_fn(timer_handler);
+    idt[HardwareInterrupt::Keyboard as u8 as usize].set_handler_fn(keyboard_handler);
     idt[HardwareInterrupt::Serial as u8 as usize].set_handler_fn(serial_handler);
 
     idt
@@ -44,9 +46,9 @@ pub fn init() {
     unsafe {
         let mut pics = PICS.lock();
         pics.initialize();
-        // Unmask timer (IRQ0) and serial (IRQ4), mask everything else
-        // Primary PIC mask: bit=1 means masked. Unmask bit 0 (timer) and bit 4 (serial)
-        x86_64::instructions::port::Port::<u8>::new(0x21).write(0b1110_1110);
+        // Unmask timer (IRQ0), keyboard (IRQ1), and serial (IRQ4), mask rest
+        // Primary PIC mask: bit=1 means masked
+        x86_64::instructions::port::Port::<u8>::new(0x21).write(0b1110_1100);
         // Secondary PIC: mask all
         x86_64::instructions::port::Port::<u8>::new(0xA1).write(0xFF);
     }
@@ -90,6 +92,18 @@ extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(HardwareInterrupt::Timer as u8);
+    }
+}
+
+extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
+    let scancode = crate::arch::x86_64::keyboard::read_scancode();
+    if let Some(byte) = crate::arch::x86_64::keyboard::handle_scancode(scancode) {
+        crate::shell::handle_serial_byte(byte);
+    }
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(HardwareInterrupt::Keyboard as u8);
     }
 }
 

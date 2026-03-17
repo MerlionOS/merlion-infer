@@ -160,14 +160,16 @@ extern "C" fn _start() -> ! {
     merlion_infer::arch::x86_64::idt::init();
     merlion_infer::serial_println!("[ok] IDT + interrupts");
 
-    // Phase 6: Page table + heap
+    // Phase 6: Page table + heap (sized to available RAM)
     unsafe {
+        let total_usable = merlion_infer::memory::phys::total_usable();
+        let heap_size = merlion_infer::memory::heap::compute_heap_size(total_usable);
         let mut mapper = merlion_infer::memory::phys::active_page_table();
         let mut fa = merlion_infer::memory::phys::BumpAllocator;
-        merlion_infer::memory::heap::init(&mut mapper, &mut fa)
+        merlion_infer::memory::heap::init_with_size(&mut mapper, &mut fa, heap_size)
             .expect("heap init failed");
-        merlion_infer::serial_println!("[ok] Heap ({} KiB)",
-            merlion_infer::memory::heap::HEAP_SIZE / 1024);
+        merlion_infer::serial_println!("[ok] Heap ({} MiB / {} MiB usable RAM)",
+            heap_size / (1024 * 1024), total_usable / (1024 * 1024));
     }
 
     // Phase 7: SMP detection
@@ -195,11 +197,17 @@ extern "C" fn _start() -> ! {
     merlion_infer::serial_println!();
     merlion_infer::shell::prompt();
 
-    // Main loop: poll serial input as fallback (IRQ4 may not fire in all QEMU configs)
+    // Main loop: poll serial + keyboard input as fallback (IRQs may not fire in all configs)
     loop {
         if merlion_infer::arch::x86_64::serial::SERIAL1.lock().data_available() {
             let byte = merlion_infer::arch::x86_64::serial::SERIAL1.lock().read_byte();
             merlion_infer::shell::handle_serial_byte(byte);
+        }
+        if merlion_infer::arch::x86_64::keyboard::data_available() {
+            let scancode = merlion_infer::arch::x86_64::keyboard::read_scancode();
+            if let Some(byte) = merlion_infer::arch::x86_64::keyboard::handle_scancode(scancode) {
+                merlion_infer::shell::handle_serial_byte(byte);
+            }
         }
         x86_64::instructions::hlt();
     }
