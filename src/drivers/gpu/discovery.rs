@@ -10,6 +10,7 @@ const AMD_VENDOR_ID: u16 = 0x1002;
 const DISPLAY_CLASS: u8 = 0x03;
 
 static DETECTED: AtomicBool = AtomicBool::new(false);
+static GCN_CAPABLE: AtomicBool = AtomicBool::new(false);
 
 struct GpuInfo {
     device_id: u16,
@@ -63,18 +64,6 @@ pub fn scan() {
 
     crate::serial_println!("[gpu] BAR0 (MMIO): {:#x}", bar0_phys);
     crate::serial_println!("[gpu] BAR2 (VRAM): {:#x}", bar2_phys);
-
-    // Try to read GPU identification from MMIO
-    if bar0_phys != 0 {
-        let mmio = phys::phys_to_virt(x86_64::PhysAddr::new(bar0_phys));
-        unsafe {
-            // Read MM_INDEX/MM_DATA to probe GPU family
-            // Register 0x00 is typically the GPU family identifier
-            let reg0 = core::ptr::read_volatile(mmio.as_ptr() as *const u32);
-            crate::serial_println!("[gpu] MMIO[0x00] = {:#010x}", reg0);
-        }
-        DETECTED.store(true, Ordering::SeqCst);
-    }
 
     let chip_name = match dev.device_id {
         // RDNA3 (Navi 3x)
@@ -131,9 +120,23 @@ pub fn scan() {
             crate::serial_println!("[gpu] Compute: not yet supported for {}", arch);
         }
     }
+
+    // Init MMIO for GCN3+ GPUs only
+    let is_gcn = matches!(arch, "GCN3" | "GCN4 (Polaris)" | "GCN5 (Vega)" | "RDNA1" | "RDNA2" | "RDNA3");
+    GCN_CAPABLE.store(is_gcn, Ordering::SeqCst);
+    DETECTED.store(true, Ordering::SeqCst);
+
+    if bar0_phys != 0 && is_gcn {
+        let mmio_virt = phys::phys_to_virt(x86_64::PhysAddr::new(bar0_phys));
+        super::mmio::init(mmio_virt.as_u64());
+        crate::serial_println!("[gpu] MMIO mapped at {:#x}", mmio_virt.as_u64());
+    } else if !is_gcn {
+        crate::serial_println!("[gpu] Pre-GCN — MMIO skipped");
+    }
 }
 
 pub fn is_detected() -> bool { DETECTED.load(Ordering::SeqCst) }
+pub fn is_gcn_capable() -> bool { GCN_CAPABLE.load(Ordering::SeqCst) }
 
 pub fn info() -> String {
     if !is_detected() { return String::from("gpu: not detected"); }

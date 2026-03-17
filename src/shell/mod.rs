@@ -542,10 +542,9 @@ fn cmd_ip() {
 fn cmd_gpu_info() {
     crate::serial_println!("{}", crate::drivers::gpu::discovery::info());
     if crate::drivers::gpu::discovery::is_detected() {
-        let used = crate::drivers::gpu::vram::used_bytes();
-        let total = crate::drivers::gpu::vram::total_bytes();
-        if total > 0 {
-            crate::serial_println!("VRAM: {} MiB / {} MiB", used / (1024*1024), total / (1024*1024));
+        crate::drivers::gpu::info::print_diagnostics();
+        if crate::drivers::gpu::compute::is_ready() {
+            crate::serial_println!("Compute queue: ready");
         }
     }
 }
