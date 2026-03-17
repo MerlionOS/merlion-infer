@@ -175,11 +175,12 @@ extern "C" fn _start() -> ! {
     // Phase 7: SMP detection
     merlion_infer::arch::x86_64::smp::init();
 
-    // Phase 8: Storage drivers
-    merlion_infer::drivers::nvme::init();
+    // Phase 8: Storage drivers (detect Apple NVMe quirks first)
     let apple_quirks = merlion_infer::drivers::apple_nvme::detect();
     if apple_quirks.is_apple {
-        merlion_infer::serial_println!("[boot] Apple NVMe detected — quirks applied");
+        merlion_infer::drivers::nvme::init_with_quirks(&apple_quirks);
+    } else {
+        merlion_infer::drivers::nvme::init();
     }
     merlion_infer::drivers::virtio_blk::init();
 

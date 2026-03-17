@@ -5,6 +5,13 @@ use x86_64::instructions::port::Port;
 
 pub fn shutdown() -> ! {
     crate::serial_println!("[acpi] shutting down...");
+
+    // Send NVMe shutdown notification on Apple hardware
+    // (prevents boot issues on next power-on)
+    if crate::drivers::nvme::is_detected() && crate::drivers::nvme::is_apple() {
+        crate::drivers::apple_nvme::shutdown_notify(crate::drivers::nvme::regs_base());
+    }
+
     unsafe {
         Port::<u16>::new(0x604).write(0x2000);
         Port::<u16>::new(0xB004).write(0x2000);

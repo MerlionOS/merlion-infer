@@ -142,6 +142,22 @@ pub fn scan() {
         let mmio_virt = phys::phys_to_virt(x86_64::PhysAddr::new(bar0_phys));
         super::mmio::init(mmio_virt.as_u64());
         crate::serial_println!("[gpu] MMIO mapped at {:#x}", mmio_virt.as_u64());
+
+        // Initialize VRAM allocator from BAR2 if available
+        if bar2_phys != 0 {
+            // Probe VRAM size from CONFIG_MEMSIZE register
+            let memsize_raw = super::mmio::read32(super::regs::CONFIG_MEMSIZE);
+            let vram_bytes = if memsize_raw > 0 && memsize_raw < 65536 {
+                memsize_raw as u64 * 1024 * 1024 // value is in MiB
+            } else if memsize_raw > 0 {
+                memsize_raw as u64 // value is in bytes
+            } else {
+                0
+            };
+            if vram_bytes > 0 {
+                super::vram::init(bar2_phys, vram_bytes);
+            }
+        }
     } else if !is_gcn {
         crate::serial_println!("[gpu] Pre-GCN — MMIO skipped");
     }

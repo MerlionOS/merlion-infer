@@ -13,9 +13,13 @@ const NVME_SUBCLASS: u8 = 0x08;
 const NVME_PROG_IF: u8 = 0x02;
 
 const SECTOR_SIZE: usize = 512;
-const ADMIN_QUEUE_DEPTH: usize = 16;
-const IO_QUEUE_DEPTH: usize = 64;
+const DEFAULT_ADMIN_QUEUE_DEPTH: usize = 16;
+const DEFAULT_IO_QUEUE_DEPTH: usize = 64;
 const PAGE_SIZE: usize = 4096;
+
+static ADMIN_QUEUE_DEPTH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(DEFAULT_ADMIN_QUEUE_DEPTH);
+static IO_QUEUE_DEPTH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(DEFAULT_IO_QUEUE_DEPTH);
+static IS_APPLE: AtomicBool = AtomicBool::new(false);
 
 const ADMIN_OPC_IDENTIFY: u8 = 0x06;
 const ADMIN_OPC_CREATE_IO_CQ: u8 = 0x05;
@@ -144,17 +148,21 @@ unsafe fn alloc_cid() -> u16 {
     cid
 }
 
+fn admin_qd() -> usize { ADMIN_QUEUE_DEPTH.load(Ordering::Relaxed) }
+fn io_qd() -> usize { IO_QUEUE_DEPTH.load(Ordering::Relaxed) }
+
 unsafe fn admin_submit_and_wait(cmd: &NvmeSqe) -> Result<NvmeCqe, &'static str> {
+    let qd = admin_qd();
     let idx = STATE.admin_sq_tail as usize;
     ptr::write_volatile(STATE.admin_sq.add(idx), *cmd);
-    STATE.admin_sq_tail = ((idx + 1) % ADMIN_QUEUE_DEPTH) as u16;
+    STATE.admin_sq_tail = ((idx + 1) % qd) as u16;
     ring_sq_doorbell(0, STATE.admin_sq_tail);
 
     for _ in 0..10_000_000u32 {
         let cqe = ptr::read_volatile(STATE.admin_cq.add(STATE.admin_cq_head as usize));
         if cqe.phase() == STATE.admin_cq_phase {
             STATE.admin_cq_head += 1;
-            if STATE.admin_cq_head as usize >= ADMIN_QUEUE_DEPTH {
+            if STATE.admin_cq_head as usize >= qd {
                 STATE.admin_cq_head = 0;
                 STATE.admin_cq_phase = !STATE.admin_cq_phase;
             }
@@ -168,16 +176,17 @@ unsafe fn admin_submit_and_wait(cmd: &NvmeSqe) -> Result<NvmeCqe, &'static str> 
 }
 
 unsafe fn io_submit_and_wait(cmd: &NvmeSqe) -> Result<NvmeCqe, &'static str> {
+    let qd = io_qd();
     let idx = STATE.io_sq_tail as usize;
     ptr::write_volatile(STATE.io_sq.add(idx), *cmd);
-    STATE.io_sq_tail = ((idx + 1) % IO_QUEUE_DEPTH) as u16;
+    STATE.io_sq_tail = ((idx + 1) % qd) as u16;
     ring_sq_doorbell(1, STATE.io_sq_tail);
 
     for _ in 0..10_000_000u32 {
         let cqe = ptr::read_volatile(STATE.io_cq.add(STATE.io_cq_head as usize));
         if cqe.phase() == STATE.io_cq_phase {
             STATE.io_cq_head += 1;
-            if STATE.io_cq_head as usize >= IO_QUEUE_DEPTH {
+            if STATE.io_cq_head as usize >= qd {
                 STATE.io_cq_head = 0;
                 STATE.io_cq_phase = !STATE.io_cq_phase;
             }
@@ -197,6 +206,19 @@ fn alloc_zeroed_frame() -> Option<(*mut u8, u64)> {
     let virt = phys::phys_to_virt(frame.start_address());
     unsafe { ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, PAGE_SIZE); }
     Some((virt.as_mut_ptr(), phys_addr))
+}
+
+/// Initialize with Apple NVMe quirks applied.
+pub fn init_with_quirks(quirks: &crate::drivers::apple_nvme::AppleNvmeQuirks) {
+    if quirks.is_apple {
+        IS_APPLE.store(true, Ordering::SeqCst);
+        let max_qe = quirks.max_queue_entries as usize;
+        if max_qe < DEFAULT_IO_QUEUE_DEPTH {
+            IO_QUEUE_DEPTH.store(max_qe, Ordering::SeqCst);
+            crate::serial_println!("[nvme] Apple quirk: IO queue depth reduced to {}", max_qe);
+        }
+    }
+    init();
 }
 
 pub fn init() {
@@ -252,7 +274,8 @@ pub fn init() {
         STATE.admin_cq_head = 0;
         STATE.admin_cq_phase = true;
 
-        let aqa = ((ADMIN_QUEUE_DEPTH as u32 - 1) << 16) | (ADMIN_QUEUE_DEPTH as u32 - 1);
+        let aqd = admin_qd();
+        let aqa = ((aqd as u32 - 1) << 16) | (aqd as u32 - 1);
         ptr::write_volatile(&mut (*regs).aqa, aqa);
         ptr::write_volatile(&mut (*regs).asq, asq_phys);
         ptr::write_volatile(&mut (*regs).acq, acq_phys);
@@ -299,6 +322,7 @@ pub fn init() {
             nsze, nsze * SECTOR_SIZE as u64 / (1024 * 1024));
 
         // Create I/O CQ
+        let ioqd = io_qd();
         let (iocq_virt, iocq_phys) = alloc_zeroed_frame().expect("nvme: alloc I/O CQ");
         STATE.io_cq = iocq_virt as *mut NvmeCqe;
         STATE.io_cq_head = 0;
@@ -306,7 +330,7 @@ pub fn init() {
         let mut cmd = NvmeSqe::zeroed();
         cmd.cdw0 = (ADMIN_OPC_CREATE_IO_CQ as u32) | ((alloc_cid() as u32) << 16);
         cmd.prp1 = iocq_phys;
-        cmd.cdw10 = ((IO_QUEUE_DEPTH as u32 - 1) << 16) | 1;
+        cmd.cdw10 = ((ioqd as u32 - 1) << 16) | 1;
         cmd.cdw11 = 1;
         if admin_submit_and_wait(&cmd).is_err() {
             crate::serial_println!("[nvme] Create I/O CQ failed"); return;
@@ -319,13 +343,13 @@ pub fn init() {
         let mut cmd = NvmeSqe::zeroed();
         cmd.cdw0 = (ADMIN_OPC_CREATE_IO_SQ as u32) | ((alloc_cid() as u32) << 16);
         cmd.prp1 = iosq_phys;
-        cmd.cdw10 = ((IO_QUEUE_DEPTH as u32 - 1) << 16) | 1;
+        cmd.cdw10 = ((ioqd as u32 - 1) << 16) | 1;
         cmd.cdw11 = (1 << 16) | 1;
         if admin_submit_and_wait(&cmd).is_err() {
             crate::serial_println!("[nvme] Create I/O SQ failed"); return;
         }
 
-        crate::serial_println!("[nvme] I/O queues ready (depth {})", IO_QUEUE_DEPTH);
+        crate::serial_println!("[nvme] I/O queues ready (depth {})", ioqd);
         INITIALIZED.store(true, Ordering::SeqCst);
     }
 }
@@ -400,6 +424,11 @@ pub fn read_sectors(start_lba: u64, buf: &mut [u8]) -> Result<usize, &'static st
 }
 
 pub fn is_detected() -> bool { INITIALIZED.load(Ordering::SeqCst) }
+pub fn is_apple() -> bool { IS_APPLE.load(Ordering::SeqCst) }
+
+pub fn regs_base() -> *mut u8 {
+    unsafe { core::ptr::read_volatile(&raw const STATE.regs) as *mut u8 }
+}
 
 pub fn capacity_sectors() -> u64 {
     unsafe { ptr::read_volatile(&raw const STATE.ns_blocks) }
