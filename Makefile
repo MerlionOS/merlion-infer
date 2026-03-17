@@ -17,7 +17,6 @@ run: build
 		-machine q35 \
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
-		-serial stdio \
 		-nographic \
 		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
 		-kernel $(KERNEL)
@@ -40,7 +39,6 @@ run-net: build
 		-machine q35 \
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
-		-serial stdio \
 		-nographic \
 		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
 		-kernel $(KERNEL) \
@@ -53,7 +51,6 @@ run-disk: build
 		-machine q35 \
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
-		-serial stdio \
 		-nographic \
 		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
 		-kernel $(KERNEL) \
@@ -65,7 +62,6 @@ run-full: build
 		-machine q35 \
 		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
 		-m 1G \
-		-serial stdio \
 		-nographic \
 		-bios /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
 		-kernel $(KERNEL) \
@@ -79,7 +75,6 @@ run-kvm: build
 		-machine q35 \
 		-enable-kvm -cpu host \
 		-m 4G \
-		-serial stdio \
 		-nographic \
 		-bios /usr/share/OVMF/OVMF_CODE.fd \
 		-kernel $(KERNEL) \
