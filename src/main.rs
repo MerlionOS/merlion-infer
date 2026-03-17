@@ -172,8 +172,9 @@ extern "C" fn _start() -> ! {
             heap_size / (1024 * 1024), total_usable / (1024 * 1024));
     }
 
-    // Phase 7: SMP detection
+    // Phase 7: SMP detection + ACPI topology
     merlion_infer::arch::x86_64::smp::init();
+    merlion_infer::arch::x86_64::acpi_tables::discover_cpus();
 
     // Phase 8: Storage drivers (detect Apple NVMe quirks first)
     let apple_quirks = merlion_infer::drivers::apple_nvme::detect();

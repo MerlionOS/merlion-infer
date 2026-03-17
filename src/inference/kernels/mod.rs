@@ -4,4 +4,8 @@ pub mod scalar;
 // Enable with: RUSTFLAGS="--cfg avx2_available" cargo build
 #[cfg(avx2_available)]
 pub mod avx2;
+// AVX-512 kernels: 512-bit SIMD for Intel Skylake-X+ / AMD Zen 4+.
+// Enable with: RUSTFLAGS="--cfg avx512_available" cargo build
+#[cfg(avx512_available)]
+pub mod avx512;
 pub mod dispatch;

@@ -8,3 +8,5 @@ pub mod acpi;
 pub mod font;
 pub mod framebuffer;
 pub mod keyboard;
+pub mod acpi_tables;
+pub mod smp_boot;

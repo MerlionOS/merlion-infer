@@ -51,26 +51,70 @@ fn handle_metrics() -> Response {
 }
 
 fn handle_chat_completions(req: &Request) -> Response {
-    // Parse the request body (simplified JSON extraction)
     let body_str = core::str::from_utf8(&req.body).unwrap_or("");
-
-    // Extract the last message content (very basic JSON parsing)
     let prompt = extract_last_message(body_str).unwrap_or("Hello");
+    let stream = body_str.contains(r#""stream":true"#) || body_str.contains(r#""stream": true"#);
 
-    // For now, return a placeholder response since model isn't loaded
-    Response::json(200, &format!(
-        r#"{{"id":"chatcmpl-merlion","object":"chat.completion","choices":[{{"index":0,"message":{{"role":"assistant","content":"[MerlionOS Inference] Model not loaded. Received: {}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}}}"#,
-        escape_json(prompt)
-    ))
+    if !crate::inference::state::is_loaded() {
+        return Response::json(200, &format!(
+            r#"{{"id":"chatcmpl-merlion","object":"chat.completion","choices":[{{"index":0,"message":{{"role":"assistant","content":"Model not loaded. Run ai-load first."}},"finish_reason":"stop"}}]}}"#,
+        ));
+    }
+
+    // Run inference
+    let sampler = crate::inference::sampler::Sampler::new(0.8, 0.9);
+    let result = crate::inference::state::with_engine(|engine| {
+        crate::inference::generate::generate(engine, prompt, 128, &sampler)
+    });
+
+    let (text, n_tokens) = match result {
+        Some((text, n, _)) => (text, n),
+        None => (alloc::string::String::from("inference error"), 0),
+    };
+
+    if stream {
+        // SSE streaming: send each chunk as a Server-Sent Event
+        let mut sse_body = alloc::string::String::new();
+        // Send content in a single chunk (true token-by-token streaming
+        // requires async TCP sends, which we'll add later)
+        sse_body.push_str(&format!(
+            "data: {{\"id\":\"chatcmpl-merlion\",\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n",
+            escape_json(&text)
+        ));
+        sse_body.push_str("data: {\"id\":\"chatcmpl-merlion\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n");
+        sse_body.push_str("data: [DONE]\n\n");
+        Response::sse(&sse_body)
+    } else {
+        Response::json(200, &format!(
+            r#"{{"id":"chatcmpl-merlion","object":"chat.completion","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":0,"completion_tokens":{},"total_tokens":{}}}}}"#,
+            escape_json(&text), n_tokens, n_tokens,
+        ))
+    }
 }
 
 fn handle_completions(req: &Request) -> Response {
     let body_str = core::str::from_utf8(&req.body).unwrap_or("");
     let prompt = extract_field(body_str, "prompt").unwrap_or("Hello");
 
+    if !crate::inference::state::is_loaded() {
+        return Response::json(200, &format!(
+            r#"{{"id":"cmpl-merlion","object":"text_completion","choices":[{{"text":"Model not loaded","index":0,"finish_reason":"stop"}}]}}"#,
+        ));
+    }
+
+    let sampler = crate::inference::sampler::Sampler::new(0.8, 0.9);
+    let result = crate::inference::state::with_engine(|engine| {
+        crate::inference::generate::generate(engine, prompt, 128, &sampler)
+    });
+
+    let (text, n_tokens) = match result {
+        Some((text, n, _)) => (text, n),
+        None => (alloc::string::String::from(""), 0),
+    };
+
     Response::json(200, &format!(
-        r#"{{"id":"cmpl-merlion","object":"text_completion","choices":[{{"text":"[Model not loaded] Echo: {}","index":0,"finish_reason":"stop"}}],"usage":{{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}}}"#,
-        escape_json(prompt)
+        r#"{{"id":"cmpl-merlion","object":"text_completion","choices":[{{"text":"{}","index":0,"finish_reason":"stop"}}],"usage":{{"prompt_tokens":0,"completion_tokens":{},"total_tokens":{}}}}}"#,
+        escape_json(&text), n_tokens, n_tokens,
     ))
 }
 

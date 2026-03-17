@@ -2,6 +2,7 @@ pub mod pci;
 pub mod nvme;
 pub mod apple_nvme;
 pub mod xhci;
+pub mod xhci_transfer;
 pub mod usb_ethernet;
 pub mod virtio;
 pub mod virtio_blk;

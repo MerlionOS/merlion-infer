@@ -8,3 +8,4 @@ pub mod generate;
 pub mod bench;
 pub mod state;
 pub mod test_model;
+pub mod kv_cache;

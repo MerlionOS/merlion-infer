@@ -22,6 +22,8 @@ pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    /// If true, body contains SSE events (text/event-stream).
+    pub is_sse: bool,
 }
 
 impl Response {
@@ -30,6 +32,7 @@ impl Response {
             status,
             content_type: "application/json",
             body: body.as_bytes().to_vec(),
+            is_sse: false,
         }
     }
 
@@ -38,6 +41,16 @@ impl Response {
             status,
             content_type: "text/plain",
             body: body.as_bytes().to_vec(),
+            is_sse: false,
+        }
+    }
+
+    pub fn sse(body: &str) -> Self {
+        Self {
+            status: 200,
+            content_type: "text/event-stream",
+            body: body.as_bytes().to_vec(),
+            is_sse: true,
         }
     }
 
@@ -52,15 +65,24 @@ impl Response {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        let header = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
-            self.status, self.status_text(),
-            self.content_type,
-            self.body.len(),
-        );
-        let mut out = header.into_bytes();
-        out.extend_from_slice(&self.body);
-        out
+        if self.is_sse {
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+            );
+            let mut out = header.into_bytes();
+            out.extend_from_slice(&self.body);
+            out
+        } else {
+            let header = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+                self.status, self.status_text(),
+                self.content_type,
+                self.body.len(),
+            );
+            let mut out = header.into_bytes();
+            out.extend_from_slice(&self.body);
+            out
+        }
     }
 }
 
