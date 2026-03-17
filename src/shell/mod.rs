@@ -103,6 +103,9 @@ fn dispatch(input: &str) {
         "ai-info" => cmd_ai_info(),
         "ai" => cmd_ai(args),
         "ai-bench" => cmd_ai_bench(),
+        "ai-serve" => cmd_ai_serve(args),
+        "ip" => cmd_ip(),
+        "ss" => cmd_ss(),
         "reboot" => crate::arch::x86_64::acpi::reboot(),
         "shutdown" => crate::arch::x86_64::acpi::shutdown(),
         "clear" => crate::serial_print!("\x1b[2J\x1b[H"),
@@ -127,6 +130,10 @@ fn cmd_help() {
     crate::serial_println!("  ai-info    — current model info");
     crate::serial_println!("  ai <text>  — generate text");
     crate::serial_println!("  ai-bench   — benchmark inference speed");
+    crate::serial_println!("  ai-serve   — start OpenAI-compatible API server");
+    crate::serial_println!("Network:");
+    crate::serial_println!("  ip         — show IP address");
+    crate::serial_println!("  ss         — show TCP connections");
     crate::serial_println!("Control:");
     crate::serial_println!("  reboot     — ACPI reboot");
     crate::serial_println!("  shutdown   — ACPI shutdown");
@@ -303,4 +310,53 @@ fn cmd_ai_bench() {
     crate::serial_println!("  - Prefill speed (tokens/sec)");
     crate::serial_println!("  - Decode speed (tokens/sec)");
     crate::serial_println!("  - Peak memory usage");
+}
+
+fn cmd_ai_serve(args: &str) {
+    let port: u16 = if args.is_empty() {
+        8080
+    } else {
+        args.parse().unwrap_or(8080)
+    };
+
+    if !crate::drivers::virtio_net::is_detected() {
+        crate::serial_println!("[ai-serve] No network device. Add QEMU flags:");
+        crate::serial_println!("  -netdev user,id=n0,hostfwd=tcp::8080-:8080 -device virtio-net-pci,netdev=n0");
+        return;
+    }
+
+    crate::serial_println!("[ai-serve] Starting OpenAI-compatible API on port {}", port);
+    crate::serial_println!("[ai-serve] Endpoints:");
+    crate::serial_println!("  POST /v1/chat/completions");
+    crate::serial_println!("  GET  /v1/models");
+    crate::serial_println!("  GET  /health");
+    crate::serial_println!("  GET  /metrics");
+
+    // This blocks — runs the HTTP server loop
+    crate::serving::http::serve(port, crate::serving::openai_api::handle_request);
+}
+
+fn cmd_ip() {
+    let net = crate::net::NET.lock();
+    crate::serial_println!("eth0:");
+    crate::serial_println!("  MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        net.mac[0], net.mac[1], net.mac[2], net.mac[3], net.mac[4], net.mac[5]);
+    crate::serial_println!("  IP:  {}", net.ip);
+    crate::serial_println!("  GW:  {}", net.gateway);
+    crate::serial_println!("  RX:  {} packets", net.rx_packets);
+    crate::serial_println!("  TX:  {} packets", net.tx_packets);
+    if !crate::drivers::virtio_net::is_detected() {
+        crate::serial_println!("  NIC: not detected");
+    }
+}
+
+fn cmd_ss() {
+    let sockets = crate::net::tcp::list_sockets();
+    if sockets.is_empty() {
+        crate::serial_println!("No active TCP connections");
+    } else {
+        for (id, lip, lp, rip, rp, state) in &sockets {
+            crate::serial_println!("  sock {} | {}:{} <-> {}:{} | {:?}", id, lip, lp, rip, rp, state);
+        }
+    }
 }

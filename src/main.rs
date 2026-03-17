@@ -148,7 +148,11 @@ extern "C" fn _start() -> ! {
     merlion_infer::drivers::nvme::init();
     merlion_infer::drivers::virtio_blk::init();
 
-    // Phase 9: Ready
+    // Phase 9: Network
+    merlion_infer::drivers::virtio_net::init();
+    merlion_infer::net::init();
+
+    // Phase 10: Ready
     merlion_infer::serial_println!();
     merlion_infer::serial_println!("Kernel initialization complete.");
     merlion_infer::serial_println!("Type 'help' for available commands.");
