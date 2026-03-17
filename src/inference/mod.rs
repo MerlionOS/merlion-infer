@@ -5,3 +5,4 @@ pub mod tokenizer;
 pub mod sampler;
 pub mod engine;
 pub mod generate;
+pub mod bench;

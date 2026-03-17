@@ -106,6 +106,9 @@ fn dispatch(input: &str) {
         "ai-serve" => cmd_ai_serve(args),
         "ip" => cmd_ip(),
         "ss" => cmd_ss(),
+        "gpu-info" => cmd_gpu_info(),
+        "dmesg" => crate::log::dmesg(),
+        "config" => crate::config::show(),
         "reboot" => crate::arch::x86_64::acpi::reboot(),
         "shutdown" => crate::arch::x86_64::acpi::shutdown(),
         "clear" => crate::serial_print!("\x1b[2J\x1b[H"),
@@ -134,6 +137,11 @@ fn cmd_help() {
     crate::serial_println!("Network:");
     crate::serial_println!("  ip         — show IP address");
     crate::serial_println!("  ss         — show TCP connections");
+    crate::serial_println!("GPU:");
+    crate::serial_println!("  gpu-info   — GPU status");
+    crate::serial_println!("Debug:");
+    crate::serial_println!("  dmesg      — kernel log");
+    crate::serial_println!("  config     — show configuration");
     crate::serial_println!("Control:");
     crate::serial_println!("  reboot     — ACPI reboot");
     crate::serial_println!("  shutdown   — ACPI shutdown");
@@ -347,6 +355,17 @@ fn cmd_ip() {
     crate::serial_println!("  TX:  {} packets", net.tx_packets);
     if !crate::drivers::virtio_net::is_detected() {
         crate::serial_println!("  NIC: not detected");
+    }
+}
+
+fn cmd_gpu_info() {
+    crate::serial_println!("{}", crate::drivers::gpu::discovery::info());
+    if crate::drivers::gpu::discovery::is_detected() {
+        let used = crate::drivers::gpu::vram::used_bytes();
+        let total = crate::drivers::gpu::vram::total_bytes();
+        if total > 0 {
+            crate::serial_println!("VRAM: {} MiB / {} MiB", used / (1024*1024), total / (1024*1024));
+        }
     }
 }
 

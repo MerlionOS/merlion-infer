@@ -11,4 +11,7 @@ pub mod drivers;
 pub mod net;
 pub mod inference;
 pub mod serving;
+pub mod log;
+pub mod config;
+pub mod watchdog;
 pub mod shell;

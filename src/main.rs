@@ -152,7 +152,11 @@ extern "C" fn _start() -> ! {
     merlion_infer::drivers::virtio_net::init();
     merlion_infer::net::init();
 
-    // Phase 10: Ready
+    // Phase 10: GPU
+    merlion_infer::drivers::gpu::init();
+
+    // Phase 11: Ready
+    merlion_infer::log::info("kernel init complete");
     merlion_infer::serial_println!();
     merlion_infer::serial_println!("Kernel initialization complete.");
     merlion_infer::serial_println!("Type 'help' for available commands.");

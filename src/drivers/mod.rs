@@ -3,3 +3,4 @@ pub mod nvme;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_net;
+pub mod gpu;
