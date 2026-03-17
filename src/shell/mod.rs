@@ -100,6 +100,7 @@ fn dispatch(input: &str) {
         "lspci" => cmd_lspci(),
         "lsblk" => cmd_lsblk(),
         "ai-load" => cmd_ai_load(),
+        "disk-test" => cmd_disk_test(),
         "ai-info" => cmd_ai_info(),
         "ai" => cmd_ai(args),
         "ai-bench" => cmd_ai_bench(),
@@ -233,6 +234,37 @@ fn cmd_lsblk() {
     }
     if !crate::drivers::nvme::is_detected() && !crate::drivers::virtio_blk::is_detected() {
         crate::serial_println!("  no block devices");
+    }
+}
+
+fn cmd_disk_test() {
+    if !crate::drivers::virtio_blk::is_detected() && !crate::drivers::nvme::is_detected() {
+        crate::serial_println!("[disk-test] No block device");
+        return;
+    }
+
+    // Read 16 KiB (32 sectors) using multi-sector DMA — should be ~4 requests
+    let size = 16 * 1024;
+    let mut buf = alloc::vec![0u8; size];
+
+    let start = crate::arch::x86_64::timer::ticks();
+    let result = if crate::drivers::virtio_blk::is_detected() {
+        crate::drivers::virtio_blk::read_sectors(0, &mut buf)
+    } else {
+        crate::drivers::nvme::read_sectors(0, &mut buf)
+    };
+    let elapsed = crate::arch::x86_64::timer::ticks() - start;
+
+    match result {
+        Ok(bytes) => {
+            crate::serial_println!("[disk-test] Read {} bytes in {} ticks", bytes, elapsed);
+            // Check GGUF magic
+            if buf[0..4] == [0x47, 0x47, 0x55, 0x46] {
+                crate::serial_println!("[disk-test] GGUF magic OK");
+            }
+            crate::serial_println!("[disk-test] First 16 bytes: {:02x?}", &buf[..16]);
+        }
+        Err(e) => crate::serial_println!("[disk-test] Error: {}", e),
     }
 }
 

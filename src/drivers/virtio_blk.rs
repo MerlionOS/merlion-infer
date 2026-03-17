@@ -237,16 +237,96 @@ pub fn read_sector(sector: u64, buf: &mut [u8; 512]) -> Result<(), &'static str>
     }
 }
 
-/// Read multiple sectors into a buffer.
+/// Maximum sectors per virtio-blk request (limited by 4 KiB bounce page).
+const MAX_SECTORS_PER_REQ: usize = 4096 / 512; // 8
+
+/// Read multiple sectors in a single virtio-blk request.
+fn read_multi_sectors(start_sector: u64, buf: &mut [u8], n_sectors: usize) -> Result<usize, &'static str> {
+    if !INITIALIZED.load(Ordering::SeqCst) { return Err("virtio-blk: not initialized"); }
+    if n_sectors == 0 || n_sectors > MAX_SECTORS_PER_REQ { return Err("virtio-blk: bad count"); }
+
+    let data_bytes = n_sectors * 512;
+
+    use x86_64::structures::paging::FrameAllocator;
+    let frame = phys::BumpAllocator.allocate_frame().ok_or("virtio-blk: alloc failed")?;
+    let page_phys = frame.start_address().as_u64();
+    let page_virt = phys::phys_to_virt(frame.start_address()).as_mut_ptr::<u8>();
+
+    unsafe {
+        core::ptr::write_bytes(page_virt, 0, 4096);
+
+        // Header at offset 0 (16 bytes)
+        let header_ptr = page_virt as *mut VirtioBlkReqHeader;
+        (*header_ptr).type_ = VIRTIO_BLK_T_IN;
+        (*header_ptr).reserved = 0;
+        (*header_ptr).sector = start_sector;
+
+        let io_base = DEVICE.io_base;
+
+        // Desc 0: header (16 bytes, device reads)
+        (*DEVICE.descs.add(0)) = VqDesc {
+            addr: page_phys, len: 16,
+            flags: virtio::VIRTQ_DESC_F_NEXT, next: 1,
+        };
+        // Desc 1: data (n_sectors * 512 bytes, device writes)
+        (*DEVICE.descs.add(1)) = VqDesc {
+            addr: page_phys + 0x200, len: data_bytes as u32,
+            flags: virtio::VIRTQ_DESC_F_NEXT | virtio::VIRTQ_DESC_F_WRITE, next: 2,
+        };
+        // Desc 2: status (1 byte, device writes)
+        // Put status after the data area
+        let status_offset = 0x200 + data_bytes;
+        (*DEVICE.descs.add(2)) = VqDesc {
+            addr: page_phys + status_offset as u64, len: 1,
+            flags: virtio::VIRTQ_DESC_F_WRITE, next: 0,
+        };
+
+        let avail = &mut *DEVICE.avail;
+        let avail_idx = avail.idx;
+        avail.ring[(avail_idx as usize) % 256] = 0;
+        core::sync::atomic::fence(Ordering::SeqCst);
+        avail.idx = avail_idx.wrapping_add(1);
+        core::sync::atomic::fence(Ordering::SeqCst);
+
+        write_reg16(io_base, REG_QUEUE_NOTIFY, 0);
+
+        for _ in 0..50_000_000u32 {
+            core::sync::atomic::fence(Ordering::SeqCst);
+            let used_idx = core::ptr::read_volatile(&(*DEVICE.used).idx);
+            if used_idx != DEVICE.last_used_idx {
+                DEVICE.last_used_idx = used_idx;
+                let status_byte = core::ptr::read_volatile(page_virt.add(status_offset));
+                core::ptr::copy_nonoverlapping(page_virt.add(0x200), buf.as_mut_ptr(), data_bytes);
+                return if status_byte == 0 { Ok(data_bytes) } else { Err("virtio-blk: I/O error") };
+            }
+            core::hint::spin_loop();
+        }
+        Err("virtio-blk: timeout")
+    }
+}
+
+/// Read multiple sectors into a buffer using multi-sector DMA (8x fewer requests).
 pub fn read_sectors(start_sector: u64, buf: &mut [u8]) -> Result<usize, &'static str> {
     let total = buf.len() / 512;
-    let mut sector_buf = [0u8; 512];
-    for i in 0..total {
-        read_sector(start_sector + i as u64, &mut sector_buf)?;
-        let off = i * 512;
-        buf[off..off + 512].copy_from_slice(&sector_buf);
+    let mut offset = 0usize;
+    let mut sector = start_sector;
+    let mut remaining = total;
+
+    // Read in chunks of 8 sectors (4 KiB per request)
+    while remaining >= MAX_SECTORS_PER_REQ {
+        let bytes = read_multi_sectors(sector, &mut buf[offset..], MAX_SECTORS_PER_REQ)?;
+        offset += bytes;
+        sector += MAX_SECTORS_PER_REQ as u64;
+        remaining -= MAX_SECTORS_PER_REQ;
     }
-    Ok(total * 512)
+
+    // Remainder
+    if remaining > 0 {
+        let bytes = read_multi_sectors(sector, &mut buf[offset..], remaining)?;
+        offset += bytes;
+    }
+
+    Ok(offset)
 }
 
 pub fn is_detected() -> bool { INITIALIZED.load(Ordering::SeqCst) }

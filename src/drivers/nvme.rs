@@ -330,6 +330,9 @@ pub fn init() {
     }
 }
 
+/// Maximum sectors per NVMe read command (limited by 4 KiB bounce buffer).
+const MAX_SECTORS_PER_READ: usize = PAGE_SIZE / SECTOR_SIZE; // 8
+
 /// Read a single 512-byte sector.
 pub fn read_sector(lba: u64, buf: &mut [u8; 512]) -> Result<(), &'static str> {
     if !INITIALIZED.load(Ordering::SeqCst) { return Err("nvme: not initialized"); }
@@ -341,24 +344,59 @@ pub fn read_sector(lba: u64, buf: &mut [u8; 512]) -> Result<(), &'static str> {
         cmd.prp1 = bounce_phys;
         cmd.cdw10 = lba as u32;
         cmd.cdw11 = (lba >> 32) as u32;
-        cmd.cdw12 = 0;
+        cmd.cdw12 = 0; // 1 sector (0-based count)
         io_submit_and_wait(&cmd)?;
         ptr::copy_nonoverlapping(bounce_virt, buf.as_mut_ptr(), SECTOR_SIZE);
     }
     Ok(())
 }
 
-/// Read multiple sectors into a buffer. Returns bytes read.
+/// Read multiple sectors (up to 8) in a single NVMe command using a 4 KiB bounce buffer.
+/// Returns bytes read.
+fn read_multi(start_lba: u64, buf: &mut [u8], n_sectors: usize) -> Result<usize, &'static str> {
+    if n_sectors == 0 || n_sectors > MAX_SECTORS_PER_READ {
+        return Err("nvme: invalid sector count");
+    }
+    let (bounce_virt, bounce_phys) = alloc_zeroed_frame().ok_or("nvme: alloc failed")?;
+    let bytes = n_sectors * SECTOR_SIZE;
+    unsafe {
+        let mut cmd = NvmeSqe::zeroed();
+        cmd.cdw0 = (IO_OPC_READ as u32) | ((alloc_cid() as u32) << 16);
+        cmd.nsid = 1;
+        cmd.prp1 = bounce_phys;
+        cmd.cdw10 = start_lba as u32;
+        cmd.cdw11 = (start_lba >> 32) as u32;
+        cmd.cdw12 = (n_sectors as u32) - 1; // 0-based count
+        io_submit_and_wait(&cmd)?;
+        ptr::copy_nonoverlapping(bounce_virt, buf.as_mut_ptr(), bytes);
+    }
+    Ok(bytes)
+}
+
+/// Read multiple sectors into a buffer using multi-sector DMA (8x faster).
+/// Falls back to single-sector reads for the remainder.
 pub fn read_sectors(start_lba: u64, buf: &mut [u8]) -> Result<usize, &'static str> {
     if !INITIALIZED.load(Ordering::SeqCst) { return Err("nvme: not initialized"); }
     let total_sectors = buf.len() / SECTOR_SIZE;
-    let mut sector_buf = [0u8; 512];
-    for i in 0..total_sectors {
-        read_sector(start_lba + i as u64, &mut sector_buf)?;
-        let offset = i * SECTOR_SIZE;
-        buf[offset..offset + SECTOR_SIZE].copy_from_slice(&sector_buf);
+    let mut offset = 0usize;
+    let mut lba = start_lba;
+    let mut remaining = total_sectors;
+
+    // Read in chunks of MAX_SECTORS_PER_READ (8 sectors = 4 KiB per command)
+    while remaining >= MAX_SECTORS_PER_READ {
+        let bytes = read_multi(lba, &mut buf[offset..], MAX_SECTORS_PER_READ)?;
+        offset += bytes;
+        lba += MAX_SECTORS_PER_READ as u64;
+        remaining -= MAX_SECTORS_PER_READ;
     }
-    Ok(total_sectors * SECTOR_SIZE)
+
+    // Read remaining sectors one chunk at a time
+    if remaining > 0 {
+        let bytes = read_multi(lba, &mut buf[offset..], remaining)?;
+        offset += bytes;
+    }
+
+    Ok(offset)
 }
 
 pub fn is_detected() -> bool { INITIALIZED.load(Ordering::SeqCst) }
