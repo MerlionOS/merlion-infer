@@ -1,4 +1,4 @@
-.PHONY: build release run run-gui run-net run-disk run-full run-kvm image disk clean limine
+.PHONY: build release run run-gui run-fullscreen run-net run-disk run-full run-kvm image disk clean limine
 
 KERNEL := target/x86_64-unknown-none/debug/merlion-infer
 KERNEL_REL := target/x86_64-unknown-none/release/merlion-infer
@@ -69,6 +69,18 @@ run-gui: debug-iso
 		-m 1G \
 		-serial stdio \
 		-display cocoa \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-cdrom $(ISO)
+
+# Run in QEMU fullscreen
+run-fullscreen: debug-iso
+	qemu-system-x86_64 \
+		-machine q35 \
+		-cpu qemu64,+avx2,+sse4.1,+sse4.2,+ssse3 \
+		-m 1G \
+		-serial stdio \
+		-display cocoa \
+		-full-screen \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-cdrom $(ISO)
 
