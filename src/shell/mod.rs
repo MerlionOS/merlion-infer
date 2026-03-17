@@ -274,12 +274,150 @@ fn cmd_ai_load() {
         return;
     }
 
-    // Load built-in test model (tiny Llama, dim=32, 1 layer, vocab=256)
+    // Try loading from disk first, fall back to built-in model
+    let has_disk = crate::drivers::virtio_blk::is_detected() || crate::drivers::nvme::is_detected();
+
+    if has_disk {
+        crate::serial_println!("[ai-load] Reading model from disk...");
+        if load_from_disk() {
+            return;
+        }
+        crate::serial_println!("[ai-load] Disk load failed, using built-in model");
+    }
+
     crate::serial_println!("[ai-load] Loading built-in test model...");
     crate::inference::test_model::setup_byte_tokenizer();
     let engine = crate::inference::test_model::create_test_engine();
     crate::inference::state::load(engine);
     crate::serial_println!("[ai-load] Ready. Try: ai Hello");
+}
+
+fn load_from_disk() -> bool {
+    // Read model from disk. First read 256 KiB to get header size,
+    // then read the full model if needed.
+    let start = crate::arch::x86_64::timer::ticks();
+
+    // Step 1: Read first 16 KiB to get GGUF header basics
+    let probe_size = 16 * 1024;
+    let mut probe = alloc::vec![0u8; probe_size];
+    let read_fn = if crate::drivers::virtio_blk::is_detected() {
+        crate::drivers::virtio_blk::read_sectors as fn(u64, &mut [u8]) -> Result<usize, &'static str>
+    } else {
+        crate::drivers::nvme::read_sectors
+    };
+
+    if read_fn(0, &mut probe).is_err() {
+        crate::serial_println!("[ai-load] Disk read error");
+        return false;
+    }
+
+    if probe[0..4] != [0x47, 0x47, 0x55, 0x46] {
+        crate::serial_println!("[ai-load] No GGUF model on disk");
+        return false;
+    }
+    crate::serial_println!("[ai-load] GGUF magic OK, probing header...");
+
+    // Try parsing probe. If it fails (header too large), we can't load.
+    let model_info = match crate::inference::gguf::parse(&probe) {
+        Ok(m) => m,
+        Err(e) => {
+            crate::serial_println!("[ai-load] Header parse failed: {} (need more data)", e);
+            return false;
+        }
+    };
+
+    // Step 2: Calculate total model size and read the rest
+    let total_tensor_bytes: u64 = model_info.tensors.iter().map(|t| t.byte_size()).sum();
+    let total_size = model_info.data_offset + total_tensor_bytes as usize;
+    crate::serial_println!("[ai-load] Model: {} KiB total, reading...", total_size / 1024);
+
+    // Read full model — use single-sector reads (reliable in TCG)
+    let total_sectors = (total_size + 511) / 512;
+    let total_bytes = total_sectors * 512;
+    let mut buf = alloc::vec![0u8; total_bytes];
+    // Copy what we already have
+    buf[..probe_size].copy_from_slice(&probe[..probe_size]);
+
+    // Read remaining sectors one at a time
+    if total_size > probe_size {
+        let start_sector = (probe_size / 512) as u64;
+        let remaining_sectors = total_sectors - (probe_size / 512);
+        let mut sector_buf = [0u8; 512];
+        for i in 0..remaining_sectors {
+            let sector = start_sector + i as u64;
+            let result = if crate::drivers::virtio_blk::is_detected() {
+                crate::drivers::virtio_blk::read_sector(sector, &mut sector_buf)
+            } else {
+                crate::drivers::nvme::read_sector(sector, &mut sector_buf)
+            };
+            if result.is_err() {
+                crate::serial_println!("[ai-load] Read error at sector {}", sector);
+                return false;
+            }
+            let off = (start_sector as usize + i) * 512;
+            buf[off..off + 512].copy_from_slice(&sector_buf);
+        }
+    }
+    // Parse model config
+    let config = match crate::inference::engine::ModelConfig::from_gguf(&model_info) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::serial_println!("[ai-load] Config parse error: {}", e);
+            return false;
+        }
+    };
+
+    crate::serial_println!("[ai-load] GGUF v{}: {} tensors | dim={} layers={} heads={} vocab={}",
+        model_info.version, model_info.tensors.len(),
+        config.dim, config.n_layers, config.n_heads, config.vocab_size);
+
+    // Load tokenizer from GGUF metadata
+    if let Some(crate::inference::gguf::GgufValue::Array(tokens)) =
+        model_info.get_metadata("tokenizer.ggml.tokens")
+    {
+        let scores = model_info.get_metadata("tokenizer.ggml.scores")
+            .and_then(|v| match v {
+                crate::inference::gguf::GgufValue::Array(a) => Some(a),
+                _ => None,
+            });
+        let empty_scores = alloc::vec![];
+        let score_arr = scores.unwrap_or(&empty_scores);
+        crate::inference::tokenizer::load_from_gguf(tokens, score_arr);
+        crate::serial_println!("[ai-load] Tokenizer: {} tokens", tokens.len());
+    } else {
+        // Fall back to byte-level tokenizer
+        crate::inference::test_model::setup_byte_tokenizer();
+    }
+
+    // Build tensor map from GGUF tensor info
+    let mut tensor_map = alloc::vec::Vec::new();
+    for t in &model_info.tensors {
+        tensor_map.push((t.name.clone(), t.offset as usize, t.byte_size() as usize));
+    }
+
+    let is_quantized = model_info.tensors.iter().any(|t|
+        t.tensor_type == crate::inference::gguf::GgmlType::Q4_0 ||
+        t.tensor_type == crate::inference::gguf::GgmlType::Q8_0
+    );
+
+    let weights = crate::inference::engine::ModelWeights {
+        data: buf,
+        data_offset: model_info.data_offset,
+        tensor_map,
+        is_quantized,
+    };
+
+    let state = crate::inference::engine::RunState::new(&config);
+    let engine = crate::inference::engine::LlamaEngine::new(config, state, weights);
+
+    crate::serial_println!("[ai-load] Weights: {} KiB | State: {} KiB | Loaded in {} ticks",
+        engine.weights.memory_bytes() / 1024,
+        engine.state.memory_bytes() / 1024,
+        crate::arch::x86_64::timer::ticks() - start);
+
+    crate::inference::state::load(engine);
+    crate::serial_println!("[ai-load] Ready. Try: ai Hello");
+    true
 }
 
 fn cmd_ai_info() {

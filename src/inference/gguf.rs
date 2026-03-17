@@ -333,8 +333,9 @@ impl<'a> Reader<'a> {
                 let elem_type = GgufType::from_u32(elem_type_raw)
                     .ok_or("gguf: unknown array element type")?;
                 let count = self.read_u64()? as usize;
-                // Limit array size to prevent OOM
-                if count > 1_000_000 { return Err("gguf: array too large"); }
+                if count > 1_000_000 {
+                    return Err("gguf: array too large");
+                }
                 let mut arr = Vec::with_capacity(count);
                 for _ in 0..count {
                     arr.push(self.read_value(elem_type)?);

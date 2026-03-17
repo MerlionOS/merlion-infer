@@ -192,21 +192,17 @@ pub fn read_sector(sector: u64, buf: &mut [u8; 512]) -> Result<(), &'static str>
         let io_base = DEVICE.io_base;
 
         // Descriptor 0: header (device reads)
+        // Layout: [header 16B] [data 512B] [status 1B]
         (*DEVICE.descs.add(0)) = VqDesc {
-            addr: page_phys,
-            len: 16,
+            addr: page_phys, len: 16,
             flags: virtio::VIRTQ_DESC_F_NEXT, next: 1,
         };
-        // Descriptor 1: data (device writes)
         (*DEVICE.descs.add(1)) = VqDesc {
-            addr: page_phys + 0x200,
-            len: 512,
+            addr: page_phys + 16, len: 512,
             flags: virtio::VIRTQ_DESC_F_NEXT | virtio::VIRTQ_DESC_F_WRITE, next: 2,
         };
-        // Descriptor 2: status (device writes)
         (*DEVICE.descs.add(2)) = VqDesc {
-            addr: page_phys + 0x400,
-            len: 1,
+            addr: page_phys + 16 + 512, len: 1,
             flags: virtio::VIRTQ_DESC_F_WRITE, next: 0,
         };
 
@@ -227,8 +223,8 @@ pub fn read_sector(sector: u64, buf: &mut [u8; 512]) -> Result<(), &'static str>
             let used_idx = core::ptr::read_volatile(&(*DEVICE.used).idx);
             if used_idx != DEVICE.last_used_idx {
                 DEVICE.last_used_idx = used_idx;
-                let status_byte = core::ptr::read_volatile(page_virt.add(0x400));
-                core::ptr::copy_nonoverlapping(page_virt.add(0x200), buf.as_mut_ptr(), 512);
+                let status_byte = core::ptr::read_volatile(page_virt.add(16 + 512));
+                core::ptr::copy_nonoverlapping(page_virt.add(16), buf.as_mut_ptr(), 512);
                 return if status_byte == 0 { Ok(()) } else { Err("virtio-blk: I/O error") };
             }
             core::hint::spin_loop();
@@ -237,8 +233,10 @@ pub fn read_sector(sector: u64, buf: &mut [u8; 512]) -> Result<(), &'static str>
     }
 }
 
-/// Maximum sectors per virtio-blk request (limited by 4 KiB bounce page).
-const MAX_SECTORS_PER_REQ: usize = 4096 / 512; // 8
+/// Maximum sectors per virtio-blk request.
+/// Bounce page layout: header(16B) + data + status(1B) ≤ 4096
+/// Max data = 4096 - 16 - 1 = 4079 → 7 sectors (3584 bytes)
+const MAX_SECTORS_PER_REQ: usize = 7;
 
 /// Read multiple sectors in a single virtio-blk request.
 fn read_multi_sectors(start_sector: u64, buf: &mut [u8], n_sectors: usize) -> Result<usize, &'static str> {
@@ -263,19 +261,21 @@ fn read_multi_sectors(start_sector: u64, buf: &mut [u8], n_sectors: usize) -> Re
 
         let io_base = DEVICE.io_base;
 
+        // Bounce page layout: [header 16B] [data N*512B] [status 1B]
+        let data_start = 16usize;
+        let status_offset = data_start + data_bytes;
+
         // Desc 0: header (16 bytes, device reads)
         (*DEVICE.descs.add(0)) = VqDesc {
             addr: page_phys, len: 16,
             flags: virtio::VIRTQ_DESC_F_NEXT, next: 1,
         };
-        // Desc 1: data (n_sectors * 512 bytes, device writes)
+        // Desc 1: data
         (*DEVICE.descs.add(1)) = VqDesc {
-            addr: page_phys + 0x200, len: data_bytes as u32,
+            addr: page_phys + data_start as u64, len: data_bytes as u32,
             flags: virtio::VIRTQ_DESC_F_NEXT | virtio::VIRTQ_DESC_F_WRITE, next: 2,
         };
-        // Desc 2: status (1 byte, device writes)
-        // Put status after the data area
-        let status_offset = 0x200 + data_bytes;
+        // Desc 2: status
         (*DEVICE.descs.add(2)) = VqDesc {
             addr: page_phys + status_offset as u64, len: 1,
             flags: virtio::VIRTQ_DESC_F_WRITE, next: 0,
@@ -296,7 +296,7 @@ fn read_multi_sectors(start_sector: u64, buf: &mut [u8], n_sectors: usize) -> Re
             if used_idx != DEVICE.last_used_idx {
                 DEVICE.last_used_idx = used_idx;
                 let status_byte = core::ptr::read_volatile(page_virt.add(status_offset));
-                core::ptr::copy_nonoverlapping(page_virt.add(0x200), buf.as_mut_ptr(), data_bytes);
+                core::ptr::copy_nonoverlapping(page_virt.add(data_start), buf.as_mut_ptr(), data_bytes);
                 return if status_byte == 0 { Ok(data_bytes) } else { Err("virtio-blk: I/O error") };
             }
             core::hint::spin_loop();
